@@ -102,6 +102,76 @@ pub struct HardwareBootResult {
     pub tools: Vec<Box<dyn crate::tools::Tool>>,
     /// Human-readable device summary for the LLM system prompt.
     pub device_summary: String,
+    /// Content of `~/.zeroclaw/hardware/` context files (HARDWARE.md, device
+    /// profiles, and skills) for injection into the system prompt.
+    pub context_files_prompt: String,
+}
+
+/// Load hardware context files from `~/.zeroclaw/hardware/` and return them
+/// concatenated as a single markdown string ready for system-prompt injection.
+///
+/// Reads (if they exist):
+/// 1. `~/.zeroclaw/hardware/HARDWARE.md`
+/// 2. `~/.zeroclaw/hardware/devices/<alias>.md` for each discovered alias
+/// 3. All `~/.zeroclaw/hardware/skills/*.md` files (sorted by name)
+///
+/// Missing files are silently skipped. Returns an empty string when no files
+/// are found.
+pub fn load_hardware_context_prompt(aliases: &[&str]) -> String {
+    let home = match directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf()) {
+        Some(h) => h,
+        None => return String::new(),
+    };
+    load_hardware_context_from_dir(&home.join(".zeroclaw").join("hardware"), aliases)
+}
+
+/// Inner helper that reads hardware context from an explicit base directory.
+/// Separated from [`load_hardware_context_prompt`] to allow unit-testing with
+/// a temporary directory.
+fn load_hardware_context_from_dir(hw_dir: &std::path::Path, aliases: &[&str]) -> String {
+    let mut sections: Vec<String> = Vec::new();
+
+    // 1. Global HARDWARE.md
+    let global = hw_dir.join("HARDWARE.md");
+    if let Ok(content) = std::fs::read_to_string(&global) {
+        if !content.trim().is_empty() {
+            sections.push(content.trim().to_string());
+        }
+    }
+
+    // 2. Per-device profile
+    let devices_dir = hw_dir.join("devices");
+    for alias in aliases {
+        let path = devices_dir.join(format!("{alias}.md"));
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if !content.trim().is_empty() {
+                sections.push(content.trim().to_string());
+            }
+        }
+    }
+
+    // 3. Skills directory (*.md files, sorted)
+    let skills_dir = hw_dir.join("skills");
+    if let Ok(entries) = std::fs::read_dir(&skills_dir) {
+        let mut skill_paths: Vec<std::path::PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
+            .collect();
+        skill_paths.sort();
+        for path in skill_paths {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if !content.trim().is_empty() {
+                    sections.push(content.trim().to_string());
+                }
+            }
+        }
+    }
+
+    if sections.is_empty() {
+        return String::new();
+    }
+    sections.join("\n\n")
 }
 
 /// Boot the hardware subsystem: discover devices + load tool registry.
@@ -178,9 +248,22 @@ pub async fn boot(
     if !tools.is_empty() {
         tracing::info!(count = tools.len(), "Hardware registry tools loaded");
     }
+    let alias_strings: Vec<String> = {
+        let reg = devices.read().await;
+        reg.aliases()
+            .into_iter()
+            .map(|s: &str| s.to_string())
+            .collect()
+    };
+    let alias_refs: Vec<&str> = alias_strings.iter().map(|s: &String| s.as_str()).collect();
+    let context_files_prompt = load_hardware_context_prompt(&alias_refs);
+    if !context_files_prompt.is_empty() {
+        tracing::info!("Hardware context files loaded");
+    }
     Ok(HardwareBootResult {
         tools,
         device_summary,
+        context_files_prompt,
     })
 }
 
@@ -202,9 +285,12 @@ pub async fn boot(
             "Hardware registry tools loaded (plugins only)"
         );
     }
+    // No discovered devices in no-hardware fallback; still load global files.
+    let context_files_prompt = load_hardware_context_prompt(&[]);
     Ok(HardwareBootResult {
         tools,
         device_summary,
+        context_files_prompt,
     })
 }
 
@@ -450,4 +536,98 @@ fn info_via_probe(chip: &str) -> anyhow::Result<()> {
     println!();
     println!("Info read via USB (SWD) — no firmware on target needed.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_hardware_context_from_dir;
+    use std::fs;
+
+    fn write(path: &std::path::Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn empty_dir_returns_empty_string() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(load_hardware_context_from_dir(tmp.path(), &[]), "");
+    }
+
+    #[test]
+    fn hardware_md_only_returns_its_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join("HARDWARE.md"), "# Global HW\npin 25 = LED");
+        let result = load_hardware_context_from_dir(tmp.path(), &[]);
+        assert!(result.contains("pin 25 = LED"), "got: {result}");
+    }
+
+    #[test]
+    fn device_profile_loaded_for_matching_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            &tmp.path().join("devices").join("pico0.md"),
+            "# pico0\nPort: /dev/cu.usbmodem1101",
+        );
+        let result = load_hardware_context_from_dir(tmp.path(), &["pico0"]);
+        assert!(result.contains("/dev/cu.usbmodem1101"), "got: {result}");
+    }
+
+    #[test]
+    fn device_profile_skipped_for_non_matching_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            &tmp.path().join("devices").join("pico0.md"),
+            "# pico0\nPort: /dev/cu.usbmodem1101",
+        );
+        // No alias provided — device profile must not appear
+        let result = load_hardware_context_from_dir(tmp.path(), &[]);
+        assert!(!result.contains("pico0"), "got: {result}");
+    }
+
+    #[test]
+    fn skills_loaded_and_sorted() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            &tmp.path().join("skills").join("blink.md"),
+            "# Skill: Blink\nuse device_exec",
+        );
+        write(
+            &tmp.path().join("skills").join("gpio.md"),
+            "# Skill: GPIO\ngpio_write",
+        );
+        let result = load_hardware_context_from_dir(tmp.path(), &[]);
+        // blink.md sorts before gpio.md
+        let blink_pos = result.find("device_exec").unwrap();
+        let gpio_pos = result.find("gpio_write").unwrap();
+        assert!(blink_pos < gpio_pos, "skills not sorted; got: {result}");
+    }
+
+    #[test]
+    fn sections_joined_with_double_newline() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join("HARDWARE.md"), "global");
+        write(&tmp.path().join("devices").join("pico0.md"), "device");
+        let result = load_hardware_context_from_dir(tmp.path(), &["pico0"]);
+        assert!(result.contains("global\n\ndevice"), "got: {result}");
+    }
+
+    #[test]
+    fn hardware_context_contains_device_exec_rule() {
+        // Verify that the installed HARDWARE.md (from Section 3) contains
+        // the device_exec rule so the LLM knows to use it for blink/loops.
+        // This acts as the Section 5 BUG-2 behavioral gate.
+        if let Some(home) = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf()) {
+            let hw_md = home.join(".zeroclaw").join("hardware").join("HARDWARE.md");
+            if hw_md.exists() {
+                let content = fs::read_to_string(&hw_md).unwrap_or_default();
+                assert!(
+                    content.contains("device_exec"),
+                    "HARDWARE.md must mention device_exec for blink/loop operations; got: {content}"
+                );
+            }
+        }
+    }
 }

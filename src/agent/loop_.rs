@@ -2512,6 +2512,7 @@ pub async fn run(
 
     // ── Hardware registry tools (Phase 4 ToolRegistry + plugins) ──
     let hw_boot = crate::hardware::boot(&config.peripherals).await?;
+    let hw_context_files_prompt = hw_boot.context_files_prompt.clone();
     let (hw_device_summary, _hw_added_tool_names) =
         crate::hardware::merge_hardware_tools(&mut tools_registry, hw_boot);
 
@@ -2728,6 +2729,12 @@ pub async fn run(
     {
         system_prompt.push_str("\n## Connected Hardware Devices\n\n");
         system_prompt.push_str(&hw_device_summary);
+        system_prompt.push('\n');
+    }
+    // Inject hardware context files (HARDWARE.md, device profiles, skills)
+    if !hw_context_files_prompt.is_empty() {
+        system_prompt.push_str("\n## Hardware Context\n\n");
+        system_prompt.push_str(&hw_context_files_prompt);
         system_prompt.push('\n');
     }
     system_prompt.push_str(&build_shell_policy_instructions(&config.autonomy));
@@ -3148,6 +3155,7 @@ pub async fn process_message_with_session(
 
     // ── Hardware registry tools (Phase 4 ToolRegistry + plugins) ──
     let hw_boot = crate::hardware::boot(&config.peripherals).await?;
+    let hw_context_files_prompt = hw_boot.context_files_prompt.clone();
     let (hw_device_summary, _hw_added_tool_names) =
         crate::hardware::merge_hardware_tools(&mut tools_registry, hw_boot);
 
@@ -3275,6 +3283,12 @@ pub async fn process_message_with_session(
     {
         system_prompt.push_str("\n## Connected Hardware Devices\n\n");
         system_prompt.push_str(&hw_device_summary);
+        system_prompt.push('\n');
+    }
+    // Inject hardware context files (HARDWARE.md, device profiles, skills)
+    if !hw_context_files_prompt.is_empty() {
+        system_prompt.push_str("\n## Hardware Context\n\n");
+        system_prompt.push_str(&hw_context_files_prompt);
         system_prompt.push('\n');
     }
     system_prompt.push_str(&build_shell_policy_instructions(&config.autonomy));
