@@ -131,6 +131,32 @@ const AUTO_CRON_DELIVERY_CHANNELS: &[&str] = &["telegram", "discord", "slack", "
 
 const NON_CLI_APPROVAL_WAIT_TIMEOUT_SECS: u64 = 300;
 const NON_CLI_APPROVAL_POLL_INTERVAL_MS: u64 = 250;
+const MISSING_TOOL_CALL_RETRY_PROMPT: &str = "Internal correction: your last reply implied a follow-up action or claimed action completion, but no valid tool call was emitted. If a tool is needed, emit it now using the required <tool_call>...</tool_call> format. If no tool is needed, provide the complete final answer now and do not defer action.";
+
+/// Detect completion claims that imply state-changing work already happened
+/// without an accompanying tool call.
+static ACTION_COMPLETION_CUE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?ix)\b(done|completed?|finished|successfully|i(?:'ve|\s+have)|we(?:'ve|\s+have))\b",
+    )
+    .unwrap()
+});
+
+/// Verbs that usually imply side effects requiring tool execution.
+static SIDE_EFFECT_ACTION_VERB_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?ix)\b(create|created|write|wrote|run|ran|execute|executed|update|updated|delete|deleted|remove|removed|rename|renamed|move|moved|install|installed|save|saved|make|made)\b",
+    )
+    .unwrap()
+});
+
+/// Concrete artifacts often referenced in file/system action completion claims.
+static SIDE_EFFECT_ACTION_OBJECT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?ix)\b(file|files|folder|folders|directory|directories|workspace|cwd|current\s+working\s+directory|command|commands|script|scripts|path|paths)\b",
+    )
+    .unwrap()
+});
 
 #[derive(Debug, Clone)]
 pub(crate) struct NonCliApprovalPrompt {
@@ -395,6 +421,17 @@ fn build_assistant_history_with_tool_calls(text: &str, tool_calls: &[ToolCall]) 
     parts.join("\n")
 }
 
+fn looks_like_unverified_action_completion_without_tool_call(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    ACTION_COMPLETION_CUE_REGEX.is_match(trimmed)
+        && SIDE_EFFECT_ACTION_VERB_REGEX.is_match(trimmed)
+        && SIDE_EFFECT_ACTION_OBJECT_REGEX.is_match(trimmed)
+}
+
 #[derive(Debug)]
 pub(crate) struct ToolLoopCancelled;
 
@@ -616,6 +653,8 @@ pub(crate) async fn run_tool_call_loop(
     let use_native_tools = provider.supports_native_tools() && !tool_specs.is_empty();
     let turn_id = Uuid::new_v4().to_string();
     let mut seen_tool_signatures: HashSet<(String, String)> = HashSet::new();
+    let mut missing_tool_call_retry_used = false;
+    let mut missing_tool_call_retry_prompt: Option<String> = None;
     let bypass_non_cli_approval_for_turn =
         approval.is_some_and(|mgr| channel_name != "cli" && mgr.consume_non_cli_allow_all_once());
     if bypass_non_cli_approval_for_turn {
@@ -637,6 +676,10 @@ pub(crate) async fn run_tool_call_loop(
             .is_some_and(CancellationToken::is_cancelled)
         {
             return Err(ToolLoopCancelled.into());
+        }
+
+        if let Some(retry_prompt) = missing_tool_call_retry_prompt.take() {
+            history.push(ChatMessage::user(retry_prompt));
         }
 
         let image_marker_count = multimodal::count_image_markers(history);
@@ -716,138 +759,145 @@ pub(crate) async fn run_tool_call_loop(
             chat_future.await
         };
 
-        let (response_text, parsed_text, tool_calls, assistant_history_content, native_tool_calls) =
-            match chat_result {
-                Ok(resp) => {
-                    let (resp_input_tokens, resp_output_tokens) = resp
-                        .usage
-                        .as_ref()
-                        .map(|u| (u.input_tokens, u.output_tokens))
-                        .unwrap_or((None, None));
+        let (
+            response_text,
+            parsed_text,
+            tool_calls,
+            assistant_history_content,
+            native_tool_calls,
+            parse_issue_detected,
+        ) = match chat_result {
+            Ok(resp) => {
+                let (resp_input_tokens, resp_output_tokens) = resp
+                    .usage
+                    .as_ref()
+                    .map(|u| (u.input_tokens, u.output_tokens))
+                    .unwrap_or((None, None));
 
-                    observer.record_event(&ObserverEvent::LlmResponse {
-                        provider: provider_name.to_string(),
-                        model: model.to_string(),
-                        duration: llm_started_at.elapsed(),
-                        success: true,
-                        error_message: None,
-                        input_tokens: resp_input_tokens,
-                        output_tokens: resp_output_tokens,
-                    });
+                observer.record_event(&ObserverEvent::LlmResponse {
+                    provider: provider_name.to_string(),
+                    model: model.to_string(),
+                    duration: llm_started_at.elapsed(),
+                    success: true,
+                    error_message: None,
+                    input_tokens: resp_input_tokens,
+                    output_tokens: resp_output_tokens,
+                });
 
-                    let response_text = resp.text_or_empty().to_string();
-                    // First try native structured tool calls (OpenAI-format).
-                    // Fall back to text-based parsing (XML tags, markdown blocks,
-                    // GLM format) only if the provider returned no native calls —
-                    // this ensures we support both native and prompt-guided models.
-                    let mut calls = parse_structured_tool_calls(&resp.tool_calls);
-                    let mut parsed_text = String::new();
+                let response_text = resp.text_or_empty().to_string();
+                // First try native structured tool calls (OpenAI-format).
+                // Fall back to text-based parsing (XML tags, markdown blocks,
+                // GLM format) only if the provider returned no native calls —
+                // this ensures we support both native and prompt-guided models.
+                let mut calls = parse_structured_tool_calls(&resp.tool_calls);
+                let mut parsed_text = String::new();
 
-                    if calls.is_empty() {
-                        let (fallback_text, fallback_calls) = parse_tool_calls(&response_text);
-                        if !fallback_text.is_empty() {
-                            parsed_text = fallback_text;
-                        }
-                        calls = fallback_calls;
+                if calls.is_empty() {
+                    let (fallback_text, fallback_calls) = parse_tool_calls(&response_text);
+                    if !fallback_text.is_empty() {
+                        parsed_text = fallback_text;
                     }
-
-                    if let Some(parse_issue) = detect_tool_call_parse_issue(&response_text, &calls)
-                    {
-                        runtime_trace::record_event(
-                            "tool_call_parse_issue",
-                            Some(channel_name),
-                            Some(provider_name),
-                            Some(model),
-                            Some(&turn_id),
-                            Some(false),
-                            Some(&parse_issue),
-                            serde_json::json!({
-                                "iteration": iteration + 1,
-                                "response_excerpt": truncate_with_ellipsis(
-                                    &scrub_credentials(&response_text),
-                                    600
-                                ),
-                            }),
-                        );
-                    }
-
-                    runtime_trace::record_event(
-                        "llm_response",
-                        Some(channel_name),
-                        Some(provider_name),
-                        Some(model),
-                        Some(&turn_id),
-                        Some(true),
-                        None,
-                        serde_json::json!({
-                            "iteration": iteration + 1,
-                            "duration_ms": llm_started_at.elapsed().as_millis(),
-                            "input_tokens": resp_input_tokens,
-                            "output_tokens": resp_output_tokens,
-                            "raw_response": scrub_credentials(&response_text),
-                            "native_tool_calls": resp.tool_calls.len(),
-                            "parsed_tool_calls": calls.len(),
-                        }),
-                    );
-
-                    // Preserve native tool call IDs in assistant history so role=tool
-                    // follow-up messages can reference the exact call id.
-                    let reasoning_content = resp.reasoning_content.clone();
-                    let assistant_history_content = if resp.tool_calls.is_empty() {
-                        if use_native_tools {
-                            build_native_assistant_history_from_parsed_calls(
-                                &response_text,
-                                &calls,
-                                reasoning_content.as_deref(),
-                            )
-                            .unwrap_or_else(|| response_text.clone())
-                        } else {
-                            response_text.clone()
-                        }
-                    } else {
-                        build_native_assistant_history(
-                            &response_text,
-                            &resp.tool_calls,
-                            reasoning_content.as_deref(),
-                        )
-                    };
-
-                    let native_calls = resp.tool_calls;
-                    (
-                        response_text,
-                        parsed_text,
-                        calls,
-                        assistant_history_content,
-                        native_calls,
-                    )
+                    calls = fallback_calls;
                 }
-                Err(e) => {
-                    let safe_error = crate::providers::sanitize_api_error(&e.to_string());
-                    observer.record_event(&ObserverEvent::LlmResponse {
-                        provider: provider_name.to_string(),
-                        model: model.to_string(),
-                        duration: llm_started_at.elapsed(),
-                        success: false,
-                        error_message: Some(safe_error.clone()),
-                        input_tokens: None,
-                        output_tokens: None,
-                    });
+
+                let parse_issue = detect_tool_call_parse_issue(&response_text, &calls);
+                if let Some(parse_issue) = parse_issue.as_ref() {
                     runtime_trace::record_event(
-                        "llm_response",
+                        "tool_call_parse_issue",
                         Some(channel_name),
                         Some(provider_name),
                         Some(model),
                         Some(&turn_id),
                         Some(false),
-                        Some(&safe_error),
+                        Some(&parse_issue),
                         serde_json::json!({
                             "iteration": iteration + 1,
-                            "duration_ms": llm_started_at.elapsed().as_millis(),
+                            "response_excerpt": truncate_with_ellipsis(
+                                &scrub_credentials(&response_text),
+                                600
+                            ),
                         }),
                     );
-                    return Err(e);
                 }
-            };
+
+                runtime_trace::record_event(
+                    "llm_response",
+                    Some(channel_name),
+                    Some(provider_name),
+                    Some(model),
+                    Some(&turn_id),
+                    Some(true),
+                    None,
+                    serde_json::json!({
+                        "iteration": iteration + 1,
+                        "duration_ms": llm_started_at.elapsed().as_millis(),
+                        "input_tokens": resp_input_tokens,
+                        "output_tokens": resp_output_tokens,
+                        "raw_response": scrub_credentials(&response_text),
+                        "native_tool_calls": resp.tool_calls.len(),
+                        "parsed_tool_calls": calls.len(),
+                    }),
+                );
+
+                // Preserve native tool call IDs in assistant history so role=tool
+                // follow-up messages can reference the exact call id.
+                let reasoning_content = resp.reasoning_content.clone();
+                let assistant_history_content = if resp.tool_calls.is_empty() {
+                    if use_native_tools {
+                        build_native_assistant_history_from_parsed_calls(
+                            &response_text,
+                            &calls,
+                            reasoning_content.as_deref(),
+                        )
+                        .unwrap_or_else(|| response_text.clone())
+                    } else {
+                        response_text.clone()
+                    }
+                } else {
+                    build_native_assistant_history(
+                        &response_text,
+                        &resp.tool_calls,
+                        reasoning_content.as_deref(),
+                    )
+                };
+
+                let native_calls = resp.tool_calls;
+                (
+                    response_text,
+                    parsed_text,
+                    calls,
+                    assistant_history_content,
+                    native_calls,
+                    parse_issue.is_some(),
+                )
+            }
+            Err(e) => {
+                let safe_error = crate::providers::sanitize_api_error(&e.to_string());
+                observer.record_event(&ObserverEvent::LlmResponse {
+                    provider: provider_name.to_string(),
+                    model: model.to_string(),
+                    duration: llm_started_at.elapsed(),
+                    success: false,
+                    error_message: Some(safe_error.clone()),
+                    input_tokens: None,
+                    output_tokens: None,
+                });
+                runtime_trace::record_event(
+                    "llm_response",
+                    Some(channel_name),
+                    Some(provider_name),
+                    Some(model),
+                    Some(&turn_id),
+                    Some(false),
+                    Some(&safe_error),
+                    serde_json::json!({
+                        "iteration": iteration + 1,
+                        "duration_ms": llm_started_at.elapsed().as_millis(),
+                    }),
+                );
+                return Err(e);
+            }
+        };
 
         let display_text = if parsed_text.is_empty() {
             response_text.clone()
@@ -869,6 +919,68 @@ pub(crate) async fn run_tool_call_loop(
         }
 
         if tool_calls.is_empty() {
+            let completion_claim_signal =
+                looks_like_unverified_action_completion_without_tool_call(&display_text);
+            let missing_tool_call_signal = parse_issue_detected || completion_claim_signal;
+            let missing_tool_call_followthrough = !missing_tool_call_retry_used
+                && iteration + 1 < max_iterations
+                && !tool_specs.is_empty()
+                && missing_tool_call_signal;
+
+            if missing_tool_call_followthrough {
+                missing_tool_call_retry_used = true;
+                missing_tool_call_retry_prompt = Some(MISSING_TOOL_CALL_RETRY_PROMPT.to_string());
+                let retry_reason = if parse_issue_detected {
+                    "parse_issue_detected"
+                } else {
+                    "completion_claim_text_detected"
+                };
+                runtime_trace::record_event(
+                    "tool_call_followthrough_retry",
+                    Some(channel_name),
+                    Some(provider_name),
+                    Some(model),
+                    Some(&turn_id),
+                    Some(false),
+                    Some(retry_reason),
+                    serde_json::json!({
+                        "iteration": iteration + 1,
+                        "response_excerpt": truncate_with_ellipsis(
+                            &scrub_credentials(&display_text),
+                            240
+                        ),
+                    }),
+                );
+                if let Some(ref tx) = on_delta {
+                    let _ = tx
+                        .send(format!(
+                            "{DRAFT_PROGRESS_SENTINEL}\u{21bb} Retrying: response implied action without a verifiable tool call\n"
+                        ))
+                        .await;
+                }
+                continue;
+            }
+
+            if missing_tool_call_signal && missing_tool_call_retry_used {
+                runtime_trace::record_event(
+                    "tool_call_followthrough_failed",
+                    Some(channel_name),
+                    Some(provider_name),
+                    Some(model),
+                    Some(&turn_id),
+                    Some(false),
+                    Some("model repeated deferred action without tool call"),
+                    serde_json::json!({
+                        "iteration": iteration + 1,
+                        "response_excerpt": truncate_with_ellipsis(
+                            &scrub_credentials(&display_text),
+                            240
+                        ),
+                    }),
+                );
+                anyhow::bail!("Model repeatedly deferred action without emitting a tool call");
+            }
+
             runtime_trace::record_event(
                 "turn_final_response",
                 Some(channel_name),
@@ -3018,6 +3130,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_tool_call_loop_retries_when_response_claims_completion_without_tool_call() {
+        let provider = ScriptedProvider::from_text_responses(vec![
+            "Done — I've created the `names` folder in the current working directory.",
+            r#"<tool_call>
+{"name":"count_tool","arguments":{"value":"mkdir names"}}
+</tool_call>"#,
+            "done after verified tool execution",
+        ]);
+
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let tools_registry: Vec<Box<dyn Tool>> = vec![Box::new(CountingTool::new(
+            "count_tool",
+            Arc::clone(&invocations),
+        ))];
+
+        let mut history = vec![
+            ChatMessage::system("test-system"),
+            ChatMessage::user("please create the names folder"),
+        ];
+        let observer = NoopObserver;
+
+        let result = run_tool_call_loop(
+            &provider,
+            &mut history,
+            &tools_registry,
+            &observer,
+            "mock-provider",
+            "mock-model",
+            0.0,
+            true,
+            None,
+            "cli",
+            &crate::config::MultimodalConfig::default(),
+            5,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .await
+        .expect("completion claim without tool call should trigger a recovery retry");
+
+        assert_eq!(result, "done after verified tool execution");
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            1,
+            "recovery retry should enforce one real tool execution"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_tool_call_loop_errors_when_completion_claim_repeats_without_tool_call() {
+        let provider = ScriptedProvider::from_text_responses(vec![
+            "Done — I've created the `names` folder in the current working directory.",
+            "Finished successfully. The folder and file are now created in workspace.",
+        ]);
+
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let tools_registry: Vec<Box<dyn Tool>> = vec![Box::new(CountingTool::new(
+            "count_tool",
+            Arc::clone(&invocations),
+        ))];
+
+        let mut history = vec![
+            ChatMessage::system("test-system"),
+            ChatMessage::user("please create the names folder"),
+        ];
+        let observer = NoopObserver;
+
+        let err = run_tool_call_loop(
+            &provider,
+            &mut history,
+            &tools_registry,
+            &observer,
+            "mock-provider",
+            "mock-model",
+            0.0,
+            true,
+            None,
+            "cli",
+            &crate::config::MultimodalConfig::default(),
+            5,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .await
+        .expect_err("repeated completion claims without tool call should hard-fail");
+
+        let err_text = err.to_string();
+        assert!(
+            err_text.contains("deferred action without emitting a tool call"),
+            "unexpected error text: {err_text}"
+        );
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            0,
+            "tool should not execute when provider never emits a real tool call"
+        );
+    }
+
+    #[tokio::test]
     async fn run_tool_call_loop_native_mode_preserves_fallback_tool_call_ids() {
         let provider = ScriptedProvider::from_text_responses(vec![
             r#"{"content":"Need to call tool","tool_calls":[{"id":"call_abc","name":"count_tool","arguments":"{\"value\":\"X\"}"}]}"#,
@@ -3072,6 +3287,26 @@ mod tests {
                 .all(|msg| !(msg.role == "user" && msg.content.starts_with("[Tool results]"))),
             "native mode should use role=tool history instead of prompt fallback wrapper"
         );
+    }
+
+    #[test]
+    fn looks_like_unverified_action_completion_without_tool_call_detects_claimed_side_effects() {
+        assert!(looks_like_unverified_action_completion_without_tool_call(
+            "Done — I've created the `names` folder in the current working directory."
+        ));
+        assert!(looks_like_unverified_action_completion_without_tool_call(
+            "Finished successfully: I wrote the file to the workspace path."
+        ));
+    }
+
+    #[test]
+    fn looks_like_unverified_action_completion_without_tool_call_ignores_non_side_effect_text() {
+        assert!(!looks_like_unverified_action_completion_without_tool_call(
+            "Done. Here is the explanation of why that approach works."
+        ));
+        assert!(!looks_like_unverified_action_completion_without_tool_call(
+            "I have a suggestion for the plan if you want me to proceed."
+        ));
     }
 
     #[test]
