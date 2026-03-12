@@ -45,10 +45,10 @@ pub mod mcp_deferred;
 pub mod mcp_protocol;
 pub mod mcp_tool;
 pub mod mcp_transport;
-pub mod microsoft365;
 pub mod memory_forget;
 pub mod memory_recall;
 pub mod memory_store;
+pub mod microsoft365;
 pub mod model_routing_config;
 pub mod node_tool;
 pub mod pdf_read;
@@ -90,10 +90,10 @@ pub use image_info::ImageInfoTool;
 pub use mcp_client::McpRegistry;
 pub use mcp_deferred::{ActivatedToolSet, DeferredMcpToolSet};
 pub use mcp_tool::McpToolWrapper;
-pub use microsoft365::Microsoft365Tool;
 pub use memory_forget::MemoryForgetTool;
 pub use memory_recall::MemoryRecallTool;
 pub use memory_store::MemoryStoreTool;
+pub use microsoft365::Microsoft365Tool;
 pub use model_routing_config::ModelRoutingConfigTool;
 #[allow(unused_imports)]
 pub use node_tool::NodeTool;
@@ -384,7 +384,7 @@ pub fn all_tools_with_runtime(
                 tracing::error!(
                     "microsoft365: client_credentials auth_flow requires a non-empty client_secret"
                 );
-                return boxed_registry_from_arcs(tool_arcs);
+                return (boxed_registry_from_arcs(tool_arcs), None);
             }
 
             let resolved = microsoft365::types::Microsoft365ResolvedConfig {
@@ -394,11 +394,7 @@ pub fn all_tools_with_runtime(
                 auth_flow: ms_cfg.auth_flow.clone(),
                 scopes: ms_cfg.scopes.clone(),
                 token_cache_encrypted: ms_cfg.token_cache_encrypted,
-                user_id: ms_cfg
-                    .user_id
-                    .as_deref()
-                    .unwrap_or("me")
-                    .to_string(),
+                user_id: ms_cfg.user_id.as_deref().unwrap_or("me").to_string(),
             };
             // Store token cache in the config directory (next to config.toml),
             // not the workspace directory, to keep bearer tokens out of the

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use tokio::sync::Mutex;
 
 /// Cached OAuth2 token state persisted to disk between runs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +26,9 @@ impl CachedTokenState {
 /// Thread-safe token cache with disk persistence.
 pub struct TokenCache {
     inner: RwLock<Option<CachedTokenState>>,
+    /// Serialises the slow acquire/refresh path so only one caller performs the
+    /// network round-trip while others wait and then read the updated cache.
+    acquire_lock: Mutex<()>,
     config: super::types::Microsoft365ResolvedConfig,
     cache_path: PathBuf,
 }
@@ -54,6 +58,7 @@ impl TokenCache {
         let cached = Self::load_from_disk(&cache_path);
         Ok(Self {
             inner: RwLock::new(cached),
+            acquire_lock: Mutex::new(()),
             config,
             cache_path,
         })
@@ -71,7 +76,21 @@ impl TokenCache {
             }
         }
 
-        // Slow path: need to acquire or refresh.
+        // Slow path: serialise through a mutex so only one caller performs the
+        // network round-trip while concurrent callers wait and re-check.
+        let _lock = self.acquire_lock.lock().await;
+
+        // Re-check after acquiring the lock — another caller may have refreshed
+        // while we were waiting.
+        {
+            let guard = self.inner.read();
+            if let Some(ref state) = *guard {
+                if !state.is_expired() {
+                    return Ok(state.access_token.clone());
+                }
+            }
+        }
+
         let new_state = self.acquire_token(client).await?;
         let token = new_state.access_token.clone();
         self.persist_to_disk(&new_state);
@@ -80,17 +99,21 @@ impl TokenCache {
     }
 
     async fn acquire_token(&self, client: &reqwest::Client) -> anyhow::Result<CachedTokenState> {
-        // Try refresh first if we have a refresh token.
-        // Clone the token out so the RwLock guard is dropped before the await.
-        let refresh_token_copy = {
-            let guard = self.inner.read();
-            guard.as_ref().and_then(|state| state.refresh_token.clone())
-        };
-        if let Some(refresh_tok) = refresh_token_copy {
-            match self.refresh_token(client, &refresh_tok).await {
-                Ok(new_state) => return Ok(new_state),
-                Err(e) => {
-                    tracing::debug!("ms365: refresh token failed, re-authenticating: {e}");
+        // Try refresh first if we have a refresh token and the flow supports it.
+        // Client credentials flow does not issue refresh tokens, so skip the
+        // attempt entirely to avoid a wasted round-trip.
+        if self.config.auth_flow.as_str() != "client_credentials" {
+            // Clone the token out so the RwLock guard is dropped before the await.
+            let refresh_token_copy = {
+                let guard = self.inner.read();
+                guard.as_ref().and_then(|state| state.refresh_token.clone())
+            };
+            if let Some(refresh_tok) = refresh_token_copy {
+                match self.refresh_token(client, &refresh_tok).await {
+                    Ok(new_state) => return Ok(new_state),
+                    Err(e) => {
+                        tracing::debug!("ms365: refresh token failed, re-authenticating: {e}");
+                    }
                 }
             }
         }
