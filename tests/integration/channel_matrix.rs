@@ -18,17 +18,48 @@ use zeroclaw::channels::traits::{Channel, ChannelMessage, SendMessage};
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 enum ChannelEvent {
-    Send { content: String, recipient: String },
+    Send {
+        content: String,
+        recipient: String,
+    },
     StartTyping(String),
     StopTyping(String),
-    SendDraft { content: String, recipient: String },
-    UpdateDraft { recipient: String, message_id: String, text: String },
-    FinalizeDraft { recipient: String, message_id: String, text: String },
-    CancelDraft { recipient: String, message_id: String },
-    AddReaction { channel_id: String, message_id: String, emoji: String },
-    RemoveReaction { channel_id: String, message_id: String, emoji: String },
-    PinMessage { channel_id: String, message_id: String },
-    UnpinMessage { channel_id: String, message_id: String },
+    SendDraft {
+        content: String,
+        recipient: String,
+    },
+    UpdateDraft {
+        recipient: String,
+        message_id: String,
+        text: String,
+    },
+    FinalizeDraft {
+        recipient: String,
+        message_id: String,
+        text: String,
+    },
+    CancelDraft {
+        recipient: String,
+        message_id: String,
+    },
+    AddReaction {
+        channel_id: String,
+        message_id: String,
+        emoji: String,
+    },
+    RemoveReaction {
+        channel_id: String,
+        message_id: String,
+        emoji: String,
+    },
+    PinMessage {
+        channel_id: String,
+        message_id: String,
+    },
+    UnpinMessage {
+        channel_id: String,
+        message_id: String,
+    },
 }
 
 /// Full-featured matrix test channel that tracks every trait method invocation.
@@ -168,13 +199,10 @@ impl Channel for MatrixTestChannel {
     }
 
     async fn cancel_draft(&self, recipient: &str, message_id: &str) -> anyhow::Result<()> {
-        self.events
-            .lock()
-            .unwrap()
-            .push(ChannelEvent::CancelDraft {
-                recipient: recipient.to_string(),
-                message_id: message_id.to_string(),
-            });
+        self.events.lock().unwrap().push(ChannelEvent::CancelDraft {
+            recipient: recipient.to_string(),
+            message_id: message_id.to_string(),
+        });
         Ok(())
     }
 
@@ -184,14 +212,11 @@ impl Channel for MatrixTestChannel {
         message_id: &str,
         emoji: &str,
     ) -> anyhow::Result<()> {
-        self.events
-            .lock()
-            .unwrap()
-            .push(ChannelEvent::AddReaction {
-                channel_id: channel_id.to_string(),
-                message_id: message_id.to_string(),
-                emoji: emoji.to_string(),
-            });
+        self.events.lock().unwrap().push(ChannelEvent::AddReaction {
+            channel_id: channel_id.to_string(),
+            message_id: message_id.to_string(),
+            emoji: emoji.to_string(),
+        });
         Ok(())
     }
 
@@ -213,13 +238,10 @@ impl Channel for MatrixTestChannel {
     }
 
     async fn pin_message(&self, channel_id: &str, message_id: &str) -> anyhow::Result<()> {
-        self.events
-            .lock()
-            .unwrap()
-            .push(ChannelEvent::PinMessage {
-                channel_id: channel_id.to_string(),
-                message_id: message_id.to_string(),
-            });
+        self.events.lock().unwrap().push(ChannelEvent::PinMessage {
+            channel_id: channel_id.to_string(),
+            message_id: message_id.to_string(),
+        });
         Ok(())
     }
 
@@ -371,7 +393,9 @@ async fn draft_full_lifecycle_send_update_finalize() {
     assert!(matches!(&events[0], ChannelEvent::SendDraft { .. }));
     assert!(matches!(&events[1], ChannelEvent::UpdateDraft { .. }));
     assert!(matches!(&events[2], ChannelEvent::UpdateDraft { .. }));
-    assert!(matches!(&events[3], ChannelEvent::FinalizeDraft { text, .. } if text == "Final complete response"));
+    assert!(
+        matches!(&events[3], ChannelEvent::FinalizeDraft { text, .. } if text == "Final complete response")
+    );
 }
 
 #[tokio::test]
@@ -388,7 +412,9 @@ async fn draft_cancel_lifecycle() {
 
     let events = ch.events();
     assert_eq!(events.len(), 2);
-    assert!(matches!(&events[1], ChannelEvent::CancelDraft { message_id, .. } if message_id == &draft_id));
+    assert!(
+        matches!(&events[1], ChannelEvent::CancelDraft { message_id, .. } if message_id == &draft_id)
+    );
 }
 
 #[tokio::test]
@@ -436,9 +462,7 @@ async fn reaction_add_remove_lifecycle() {
 
     let events = ch.events();
     assert_eq!(events.len(), 2);
-    assert!(
-        matches!(&events[0], ChannelEvent::AddReaction { emoji, .. } if emoji == "\u{1F440}")
-    );
+    assert!(matches!(&events[0], ChannelEvent::AddReaction { emoji, .. } if emoji == "\u{1F440}"));
     assert!(
         matches!(&events[1], ChannelEvent::RemoveReaction { emoji, .. } if emoji == "\u{1F440}")
     );
@@ -485,9 +509,9 @@ async fn reaction_across_different_channels_and_messages() {
 async fn reaction_unicode_emoji_preserved() {
     let ch = MatrixTestChannel::new("discord");
     let emojis = [
-        "\u{1F600}", // grinning face
-        "\u{2764}\u{FE0F}", // red heart with variation selector
-        "\u{1F1FA}\u{1F1F8}", // US flag (regional indicator pair)
+        "\u{1F600}",                                   // grinning face
+        "\u{2764}\u{FE0F}",                            // red heart with variation selector
+        "\u{1F1FA}\u{1F1F8}",                          // US flag (regional indicator pair)
         "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", // family ZWJ sequence
     ];
 
@@ -563,8 +587,7 @@ fn channel_message_none_thread_ts_preserved() {
 
 #[test]
 fn send_message_in_thread_builder() {
-    let msg = SendMessage::new("reply", "target_123")
-        .in_thread(Some("thread_abc".into()));
+    let msg = SendMessage::new("reply", "target_123").in_thread(Some("thread_abc".into()));
 
     assert_eq!(msg.content, "reply");
     assert_eq!(msg.recipient, "target_123");
@@ -889,8 +912,8 @@ async fn threaded_reply_preserves_thread_ts() {
     let ch = MatrixTestChannel::new("slack");
     let incoming = make_platform_message("slack");
 
-    let reply = SendMessage::new("response", &incoming.reply_target)
-        .in_thread(incoming.thread_ts.clone());
+    let reply =
+        SendMessage::new("response", &incoming.reply_target).in_thread(incoming.thread_ts.clone());
     ch.send(&reply).await.unwrap();
 
     let events = ch.events();
@@ -914,12 +937,9 @@ async fn concurrent_sends_all_recorded() {
     for i in 0..20 {
         let ch = Arc::clone(&ch);
         handles.push(tokio::spawn(async move {
-            ch.send(&SendMessage::new(
-                format!("msg_{i}"),
-                format!("user_{i}"),
-            ))
-            .await
-            .unwrap();
+            ch.send(&SendMessage::new(format!("msg_{i}"), format!("user_{i}")))
+                .await
+                .unwrap();
         }));
     }
 
@@ -953,7 +973,13 @@ async fn concurrent_typing_events_all_recorded() {
 #[tokio::test]
 async fn concurrent_reactions_all_recorded() {
     let ch = Arc::new(MatrixTestChannel::new("discord"));
-    let emojis = ["\u{1F440}", "\u{2705}", "\u{1F525}", "\u{1F44D}", "\u{1F389}"];
+    let emojis = [
+        "\u{1F440}",
+        "\u{2705}",
+        "\u{1F525}",
+        "\u{1F44D}",
+        "\u{1F389}",
+    ];
     let mut handles = Vec::new();
 
     for (i, emoji) in emojis.iter().enumerate() {
@@ -1026,9 +1052,7 @@ async fn send_content_with_newlines_and_special_chars() {
 
     let events = ch.events();
     match &events[0] {
-        ChannelEvent::Send {
-            content: sent, ..
-        } => {
+        ChannelEvent::Send { content: sent, .. } => {
             assert_eq!(sent, content);
         }
         _ => panic!("expected Send event"),
