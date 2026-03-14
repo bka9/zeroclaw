@@ -4082,8 +4082,8 @@ mod tests {
     #[test]
     fn estimate_history_tokens_basic() {
         let messages = vec![
-            ChatMessage::system("a".repeat(400)),  // 100 tokens
-            ChatMessage::user("b".repeat(800)),    // 200 tokens
+            ChatMessage::system("a".repeat(400)), // 100 tokens
+            ChatMessage::user("b".repeat(800)),   // 200 tokens
         ];
         assert_eq!(estimate_history_tokens(&messages), 300);
     }
@@ -4123,10 +4123,7 @@ mod tests {
     fn truncate_history_preserves_system_and_last_user() {
         // Two messages only — should never truncate below 2
         let big = "y".repeat(500_000);
-        let mut history = vec![
-            ChatMessage::system(big.clone()),
-            ChatMessage::user(big),
-        ];
+        let mut history = vec![ChatMessage::system(big.clone()), ChatMessage::user(big)];
         // Even if over budget, cannot drop below 2
         let result = truncate_history_to_token_budget(&mut history);
         assert_eq!(history.len(), 2);
