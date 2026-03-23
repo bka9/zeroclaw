@@ -1525,6 +1525,10 @@ mod tests {
             canvas_store: crate::tools::canvas::CanvasStore::new(),
             #[cfg(feature = "webauthn")]
             webauthn: None,
+            health_webhook_secret_hash: None,
+            health_enabled: false,
+            health_allowed_metrics: Vec::new(),
+            health_max_points_per_payload: 5000,
         }
     }
 
