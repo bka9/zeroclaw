@@ -95,6 +95,7 @@ pub mod web_fetch;
 mod web_search_provider_routing;
 pub mod web_search_tool;
 pub mod workspace_tool;
+pub mod x_tool;
 
 pub use backup_tool::BackupTool;
 pub use browser::{BrowserTool, ComputerUseConfig};
@@ -175,6 +176,7 @@ pub use weather_tool::WeatherTool;
 pub use web_fetch::WebFetchTool;
 pub use web_search_tool::WebSearchTool;
 pub use workspace_tool::WorkspaceTool;
+pub use x_tool::XTool;
 
 use crate::config::{Config, DelegateAgentConfig};
 use crate::memory::Memory;
@@ -540,6 +542,37 @@ pub fn all_tools_with_runtime(
                 root_config.jira.allowed_actions.clone(),
                 security.clone(),
                 root_config.jira.timeout_secs,
+            )));
+        }
+    }
+
+    // X (Twitter) API v2 integration (config-gated)
+    if root_config.x.enabled {
+        let bearer_token = if root_config.x.bearer_token.trim().is_empty() {
+            std::env::var("X_BEARER_TOKEN").unwrap_or_default()
+        } else {
+            root_config.x.bearer_token.trim().to_string()
+        };
+        let access_token = if root_config.x.access_token.trim().is_empty() {
+            std::env::var("X_ACCESS_TOKEN").unwrap_or_default()
+        } else {
+            root_config.x.access_token.trim().to_string()
+        };
+        if bearer_token.trim().is_empty() && access_token.trim().is_empty() {
+            tracing::warn!(
+                "X tool enabled but no tokens found (set x.bearer_token / X_BEARER_TOKEN \
+                 or x.access_token / X_ACCESS_TOKEN env var)"
+            );
+        } else {
+            tool_arcs.push(Arc::new(XTool::new(
+                bearer_token,
+                access_token,
+                root_config.x.user_id.trim().to_string(),
+                root_config.x.allowed_actions.clone(),
+                security.clone(),
+                root_config.x.usage.monthly_tweet_cap,
+                root_config.x.usage.warn_at_percent,
+                root_config.x.usage.check_before_action,
             )));
         }
     }

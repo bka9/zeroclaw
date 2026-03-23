@@ -349,6 +349,10 @@ pub struct Config {
     #[serde(default)]
     pub jira: JiraConfig,
 
+    /// X (Twitter) API v2 integration configuration (`[x]`).
+    #[serde(default)]
+    pub x: XConfig,
+
     /// FatSecret nutrition integration configuration (`[nutrition]`).
     #[serde(default)]
     pub nutrition: NutritionConfig,
@@ -6879,6 +6883,94 @@ impl Default for JiraConfig {
     }
 }
 
+/// X (Twitter) API v2 integration configuration (`[x]`).
+///
+/// When `enabled = true`, registers the `x` tool for listing tweets, searching,
+/// creating posts, replying, following/unfollowing users, and monitoring API usage.
+///
+/// ## Auth
+/// Read endpoints use `bearer_token` (app-only auth).
+/// Write endpoints use `access_token` (OAuth 2.0 user token).
+/// Both fall back to `X_BEARER_TOKEN` / `X_ACCESS_TOKEN` env vars.
+///
+/// ## Usage Controls
+/// Set `[x.usage]` to configure spending guardrails via the X usage API.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct XConfig {
+    /// Enable the `x` tool. Default: `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// App-only Bearer token for read endpoints. Falls back to `X_BEARER_TOKEN` env var.
+    #[serde(default)]
+    pub bearer_token: String,
+    /// OAuth 2.0 user access token for write endpoints. Falls back to `X_ACCESS_TOKEN` env var.
+    #[serde(default)]
+    pub access_token: String,
+    /// The authenticated user's numeric X ID (required for follow/unfollow).
+    #[serde(default)]
+    pub user_id: String,
+    /// Actions the agent is permitted to call.
+    /// Valid values: `"list_tweets"`, `"get_mentions"`, `"search_tweets"`,
+    /// `"create_post"`, `"reply_to_post"`, `"follow_user"`, `"unfollow_user"`, `"get_usage"`.
+    /// Defaults to read-only: `["list_tweets", "get_mentions", "search_tweets", "get_usage"]`.
+    #[serde(default = "default_x_allowed_actions")]
+    pub allowed_actions: Vec<String>,
+    /// Usage monitoring configuration.
+    #[serde(default)]
+    pub usage: XUsageConfig,
+}
+
+fn default_x_allowed_actions() -> Vec<String> {
+    vec![
+        "list_tweets".to_string(),
+        "get_mentions".to_string(),
+        "search_tweets".to_string(),
+        "get_usage".to_string(),
+    ]
+}
+
+impl Default for XConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bearer_token: String::new(),
+            access_token: String::new(),
+            user_id: String::new(),
+            allowed_actions: default_x_allowed_actions(),
+            usage: XUsageConfig::default(),
+        }
+    }
+}
+
+/// Usage monitoring configuration for the X API (`[x.usage]`).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct XUsageConfig {
+    /// Local cap on tweet reads per month. When set, the tool queries the X usage
+    /// API and blocks actions if this cap is exceeded.
+    #[serde(default)]
+    pub monthly_tweet_cap: Option<u64>,
+    /// Log a warning when usage reaches this percentage of the effective cap. Default: `80`.
+    #[serde(default = "default_x_warn_at_percent")]
+    pub warn_at_percent: u8,
+    /// Query the X usage API before write actions to enforce caps. Default: `true`.
+    #[serde(default = "default_true")]
+    pub check_before_action: bool,
+}
+
+fn default_x_warn_at_percent() -> u8 {
+    80
+}
+
+impl Default for XUsageConfig {
+    fn default() -> Self {
+        Self {
+            monthly_tweet_cap: None,
+            warn_at_percent: default_x_warn_at_percent(),
+            check_before_action: true,
+        }
+    }
+}
+
 /// FatSecret nutrition integration configuration (`[nutrition]`).
 ///
 /// When `enabled = true`, registers the `nutrition` tool for food/recipe
@@ -7306,6 +7398,7 @@ impl Default for Config {
             workspace: WorkspaceConfig::default(),
             notion: NotionConfig::default(),
             jira: JiraConfig::default(),
+            x: XConfig::default(),
             nutrition: NutritionConfig::default(),
             health: HealthConfig::default(),
             node_transport: NodeTransportConfig::default(),
@@ -10416,6 +10509,7 @@ default_temperature = 0.7
             workspace: WorkspaceConfig::default(),
             notion: NotionConfig::default(),
             jira: JiraConfig::default(),
+            x: XConfig::default(),
             nutrition: NutritionConfig::default(),
             health: HealthConfig::default(),
             node_transport: NodeTransportConfig::default(),
@@ -10935,6 +11029,7 @@ default_temperature = 0.7
             workspace: WorkspaceConfig::default(),
             notion: NotionConfig::default(),
             jira: JiraConfig::default(),
+            x: XConfig::default(),
             nutrition: NutritionConfig::default(),
             health: HealthConfig::default(),
             node_transport: NodeTransportConfig::default(),
