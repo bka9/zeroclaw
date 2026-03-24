@@ -6889,9 +6889,11 @@ impl Default for JiraConfig {
 /// creating posts, replying, following/unfollowing users, and monitoring API usage.
 ///
 /// ## Auth
-/// Read endpoints use `bearer_token` (app-only auth).
-/// Write endpoints use `access_token` (OAuth 2.0 user token).
-/// Both fall back to `X_BEARER_TOKEN` / `X_ACCESS_TOKEN` env vars.
+/// Read endpoints use `bearer_token` (app-only auth, falls back to `X_BEARER_TOKEN`).
+/// Write endpoints use OAuth 1.0a: `consumer_key` / `consumer_secret` (API key pair)
+/// plus `oauth_token` / `oauth_token_secret` (user access token pair).
+/// Falls back to `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`,
+/// `X_ACCESS_TOKEN_SECRET` env vars respectively.
 ///
 /// ## Usage Controls
 /// Set `[x.usage]` to configure spending guardrails via the X usage API.
@@ -6903,9 +6905,18 @@ pub struct XConfig {
     /// App-only Bearer token for read endpoints. Falls back to `X_BEARER_TOKEN` env var.
     #[serde(default)]
     pub bearer_token: String,
-    /// OAuth 2.0 user access token for write endpoints. Falls back to `X_ACCESS_TOKEN` env var.
+    /// OAuth 1.0a API key (consumer key). Falls back to `X_CONSUMER_KEY` env var.
     #[serde(default)]
-    pub access_token: String,
+    pub consumer_key: String,
+    /// OAuth 1.0a API key secret (consumer secret). Falls back to `X_CONSUMER_SECRET` env var.
+    #[serde(default)]
+    pub consumer_secret: String,
+    /// OAuth 1.0a user access token. Falls back to `X_ACCESS_TOKEN` env var.
+    #[serde(default)]
+    pub oauth_token: String,
+    /// OAuth 1.0a user access token secret. Falls back to `X_ACCESS_TOKEN_SECRET` env var.
+    #[serde(default)]
+    pub oauth_token_secret: String,
     /// The authenticated user's numeric X ID (required for follow/unfollow).
     #[serde(default)]
     pub user_id: String,
@@ -6934,7 +6945,10 @@ impl Default for XConfig {
         Self {
             enabled: false,
             bearer_token: String::new(),
-            access_token: String::new(),
+            consumer_key: String::new(),
+            consumer_secret: String::new(),
+            oauth_token: String::new(),
+            oauth_token_secret: String::new(),
             user_id: String::new(),
             allowed_actions: default_x_allowed_actions(),
             usage: XUsageConfig::default(),

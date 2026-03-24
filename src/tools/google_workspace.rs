@@ -380,8 +380,19 @@ impl Tool for GoogleWorkspaceTool {
         let mut cmd = tokio::process::Command::new("gws");
         cmd.args(&cmd_args);
         cmd.env_clear();
-        // gws needs PATH to find itself and HOME/APPDATA for credential storage
-        for key in &["PATH", "HOME", "APPDATA", "USERPROFILE", "LANG", "TERM"] {
+        // gws needs PATH to find itself, HOME/APPDATA for credential storage,
+        // and GOOGLE_WORKSPACE_CLI_* for keyring backend and other gws settings.
+        for key in &[
+            "PATH",
+            "HOME",
+            "APPDATA",
+            "USERPROFILE",
+            "LANG",
+            "TERM",
+            "GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND",
+            "GOOGLE_WORKSPACE_CLI_CONFIG_DIR",
+            "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE",
+        ] {
             if let Ok(val) = std::env::var(key) {
                 cmd.env(key, val);
             }

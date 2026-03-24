@@ -1,7 +1,10 @@
 use super::traits::{Tool, ToolResult};
 use crate::security::{policy::ToolOperation, SecurityPolicy};
 use async_trait::async_trait;
+use hmac::{Hmac, Mac};
 use serde_json::json;
+use sha1::Sha1;
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Instant;
@@ -27,7 +30,10 @@ struct UsageData {
 /// operation (Read for queries, Act for mutations).
 pub struct XTool {
     bearer_token: String,
-    access_token: String,
+    consumer_key: String,
+    consumer_secret: String,
+    oauth_token: String,
+    oauth_token_secret: String,
     user_id: String,
     allowed_actions: Vec<String>,
     http: reqwest::Client,
@@ -42,7 +48,10 @@ impl XTool {
     /// Create a new X tool.
     ///
     /// - `bearer_token` — app-only auth for read endpoints and usage.
-    /// - `access_token` — OAuth 2.0 user token for write endpoints.
+    /// - `consumer_key` — OAuth 1.0a API key (consumer key).
+    /// - `consumer_secret` — OAuth 1.0a API key secret (consumer secret).
+    /// - `oauth_token` — OAuth 1.0a user access token.
+    /// - `oauth_token_secret` — OAuth 1.0a user access token secret.
     /// - `user_id` — the authenticated user's numeric X ID.
     /// - `allowed_actions` — which actions the agent may call.
     /// - `monthly_tweet_cap` — local cap on tweet reads (if set, enforced via usage API).
@@ -51,7 +60,10 @@ impl XTool {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         bearer_token: String,
-        access_token: String,
+        consumer_key: String,
+        consumer_secret: String,
+        oauth_token: String,
+        oauth_token_secret: String,
         user_id: String,
         allowed_actions: Vec<String>,
         security: Arc<SecurityPolicy>,
@@ -61,7 +73,10 @@ impl XTool {
     ) -> Self {
         Self {
             bearer_token,
-            access_token,
+            consumer_key,
+            consumer_secret,
+            oauth_token,
+            oauth_token_secret,
             user_id,
             allowed_actions,
             http: reqwest::Client::new(),
@@ -89,14 +104,116 @@ impl XTool {
         Ok(headers)
     }
 
-    /// Build Authorization header for OAuth 2.0 user token (write endpoints).
-    fn oauth_auth(&self) -> anyhow::Result<reqwest::header::HeaderMap> {
+    /// Percent-encode a string per RFC 3986 (unreserved chars are left unencoded).
+    fn percent_encode(s: &str) -> String {
+        let mut encoded = String::with_capacity(s.len());
+        for byte in s.bytes() {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    encoded.push(byte as char);
+                }
+                _ => {
+                    write!(encoded, "%{byte:02X}").unwrap();
+                }
+            }
+        }
+        encoded
+    }
+
+    /// Generate an OAuth 1.0a `Authorization` header for a given HTTP method,
+    /// URL, and optional query parameters.
+    fn oauth1a_auth(
+        &self,
+        method: &str,
+        url: &str,
+        query_params: &[(&str, &str)],
+    ) -> anyhow::Result<reqwest::header::HeaderMap> {
+        use base64::Engine as _;
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| anyhow::anyhow!("System clock error: {e}"))?
+            .as_secs()
+            .to_string();
+
+        let nonce = {
+            use rand::RngExt;
+            let mut rng = rand::rng();
+            let bytes: [u8; 32] = rng.random();
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        };
+
+        // OAuth parameters (excluding oauth_signature — added after signing)
+        let oauth_params: Vec<(&str, String)> = vec![
+            ("oauth_consumer_key", self.consumer_key.clone()),
+            ("oauth_nonce", nonce.clone()),
+            ("oauth_signature_method", "HMAC-SHA1".to_string()),
+            ("oauth_timestamp", timestamp.clone()),
+            ("oauth_token", self.oauth_token.clone()),
+            ("oauth_version", "1.0".to_string()),
+        ];
+
+        // Collect all parameters (oauth + query) into a sorted map
+        let mut all_params = BTreeMap::new();
+        for (k, v) in &oauth_params {
+            all_params.insert(Self::percent_encode(k), Self::percent_encode(v));
+        }
+        for (k, v) in query_params {
+            all_params.insert(Self::percent_encode(k), Self::percent_encode(v));
+        }
+
+        // Build parameter string: key=value pairs joined by &
+        let param_string: String = all_params
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("&");
+
+        // Build signature base string: METHOD&encoded_url&encoded_param_string
+        let base_url = url.split('?').next().unwrap_or(url);
+        let signature_base = format!(
+            "{}&{}&{}",
+            method.to_uppercase(),
+            Self::percent_encode(base_url),
+            Self::percent_encode(&param_string),
+        );
+
+        // Build signing key: percent_encode(consumer_secret)&percent_encode(token_secret)
+        let signing_key = format!(
+            "{}&{}",
+            Self::percent_encode(&self.consumer_secret),
+            Self::percent_encode(&self.oauth_token_secret),
+        );
+
+        // HMAC-SHA1
+        let mut mac = Hmac::<Sha1>::new_from_slice(signing_key.as_bytes())
+            .map_err(|e| anyhow::anyhow!("HMAC key error: {e}"))?;
+        mac.update(signature_base.as_bytes());
+        let signature =
+            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+
+        // Build Authorization header value
+        let auth_value = format!(
+            "OAuth oauth_consumer_key=\"{}\", \
+             oauth_nonce=\"{}\", \
+             oauth_signature=\"{}\", \
+             oauth_signature_method=\"HMAC-SHA1\", \
+             oauth_timestamp=\"{}\", \
+             oauth_token=\"{}\", \
+             oauth_version=\"1.0\"",
+            Self::percent_encode(&self.consumer_key),
+            Self::percent_encode(&nonce),
+            Self::percent_encode(&signature),
+            Self::percent_encode(&timestamp),
+            Self::percent_encode(&self.oauth_token),
+        );
+
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             "Authorization",
-            format!("Bearer {}", self.access_token)
+            auth_value
                 .parse()
-                .map_err(|e| anyhow::anyhow!("Invalid X access token header value: {e}"))?,
+                .map_err(|e| anyhow::anyhow!("Invalid OAuth 1.0a header value: {e}"))?,
         );
         headers.insert("Content-Type", "application/json".parse().unwrap());
         Ok(headers)
@@ -135,8 +252,7 @@ impl XTool {
         let data = &body["data"];
         let project_usage = data["project_usage"].as_u64().unwrap_or(0);
         let project_cap = data["project_cap"].as_u64().unwrap_or(0);
-        let cap_reset_day =
-            u8::try_from(data["cap_reset_day"].as_u64().unwrap_or(1)).unwrap_or(1);
+        let cap_reset_day = u8::try_from(data["cap_reset_day"].as_u64().unwrap_or(1)).unwrap_or(1);
 
         let mut cached = self.cached_usage.lock().await;
         *cached = Some((
@@ -202,15 +318,13 @@ impl XTool {
 
     /// Resolve the user_id to use — from args if provided, otherwise from config.
     fn resolve_user_id<'a>(&'a self, args: &'a serde_json::Value) -> Option<&'a str> {
-        args.get("user_id")
-            .and_then(|v| v.as_str())
-            .or_else(|| {
-                if self.user_id.is_empty() {
-                    None
-                } else {
-                    Some(self.user_id.as_str())
-                }
-            })
+        args.get("user_id").and_then(|v| v.as_str()).or_else(|| {
+            if self.user_id.is_empty() {
+                None
+            } else {
+                Some(self.user_id.as_str())
+            }
+        })
     }
 
     /// GET /2/users/{id}/tweets
@@ -307,11 +421,12 @@ impl XTool {
 
     /// POST /2/tweets
     async fn create_post(&self, text: &str) -> anyhow::Result<serde_json::Value> {
+        let url = format!("{X_API_BASE}/tweets");
         let body = json!({ "text": text });
         let resp = self
             .http
-            .post(format!("{X_API_BASE}/tweets"))
-            .headers(self.oauth_auth()?)
+            .post(&url)
+            .headers(self.oauth1a_auth("POST", &url, &[])?)
             .json(&body)
             .timeout(std::time::Duration::from_secs(X_REQUEST_TIMEOUT_SECS))
             .send()
@@ -326,11 +441,8 @@ impl XTool {
     }
 
     /// POST /2/tweets (with reply)
-    async fn reply_to_post(
-        &self,
-        tweet_id: &str,
-        text: &str,
-    ) -> anyhow::Result<serde_json::Value> {
+    async fn reply_to_post(&self, tweet_id: &str, text: &str) -> anyhow::Result<serde_json::Value> {
+        let url = format!("{X_API_BASE}/tweets");
         let body = json!({
             "text": text,
             "reply": {
@@ -339,8 +451,8 @@ impl XTool {
         });
         let resp = self
             .http
-            .post(format!("{X_API_BASE}/tweets"))
-            .headers(self.oauth_auth()?)
+            .post(&url)
+            .headers(self.oauth1a_auth("POST", &url, &[])?)
             .json(&body)
             .timeout(std::time::Duration::from_secs(X_REQUEST_TIMEOUT_SECS))
             .send()
@@ -361,7 +473,7 @@ impl XTool {
         let resp = self
             .http
             .post(&url)
-            .headers(self.oauth_auth()?)
+            .headers(self.oauth1a_auth("POST", &url, &[])?)
             .json(&body)
             .timeout(std::time::Duration::from_secs(X_REQUEST_TIMEOUT_SECS))
             .send()
@@ -384,7 +496,7 @@ impl XTool {
         let resp = self
             .http
             .delete(&url)
-            .headers(self.oauth_auth()?)
+            .headers(self.oauth1a_auth("DELETE", &url, &[])?)
             .timeout(std::time::Duration::from_secs(X_REQUEST_TIMEOUT_SECS))
             .send()
             .await?;
@@ -508,12 +620,8 @@ impl Tool for XTool {
 
         // Check action is valid
         let operation = match action {
-            "list_tweets" | "get_mentions" | "search_tweets" | "get_usage" => {
-                ToolOperation::Read
-            }
-            "create_post" | "reply_to_post" | "follow_user" | "unfollow_user" => {
-                ToolOperation::Act
-            }
+            "list_tweets" | "get_mentions" | "search_tweets" | "get_usage" => ToolOperation::Read,
+            "create_post" | "reply_to_post" | "follow_user" | "unfollow_user" => ToolOperation::Act,
             _ => {
                 return Ok(ToolResult {
                     success: false,
@@ -713,8 +821,7 @@ impl Tool for XTool {
         match result {
             Ok(value) => Ok(ToolResult {
                 success: true,
-                output: serde_json::to_string_pretty(&value)
-                    .unwrap_or_else(|_| value.to_string()),
+                output: serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()),
                 error: None,
             }),
             Err(e) => Ok(ToolResult {
@@ -735,7 +842,10 @@ mod tests {
         let security = Arc::new(SecurityPolicy::default());
         XTool::new(
             "test-bearer".into(),
-            "test-access".into(),
+            "test-consumer-key".into(),
+            "test-consumer-secret".into(),
+            "test-oauth-token".into(),
+            "test-oauth-token-secret".into(),
             "123456".into(),
             vec![
                 "list_tweets".into(),
@@ -758,7 +868,10 @@ mod tests {
         let security = Arc::new(SecurityPolicy::default());
         XTool::new(
             "test-bearer".into(),
-            "test-access".into(),
+            "test-consumer-key".into(),
+            "test-consumer-secret".into(),
+            "test-oauth-token".into(),
+            "test-oauth-token-secret".into(),
             "123456".into(),
             vec![
                 "list_tweets".into(),
@@ -834,7 +947,10 @@ mod tests {
         let security = Arc::new(SecurityPolicy::default());
         let tool = XTool::new(
             "test-bearer".into(),
-            "test-access".into(),
+            "test-consumer-key".into(),
+            "test-consumer-secret".into(),
+            "test-oauth-token".into(),
+            "test-oauth-token-secret".into(),
             String::new(), // no default user_id
             vec!["list_tweets".into()],
             security,
@@ -921,7 +1037,10 @@ mod tests {
         let security = Arc::new(SecurityPolicy::default());
         let tool = XTool::new(
             "test-bearer".into(),
-            "test-access".into(),
+            "test-consumer-key".into(),
+            "test-consumer-secret".into(),
+            "test-oauth-token".into(),
+            "test-oauth-token-secret".into(),
             String::new(), // no configured user_id
             vec!["follow_user".into()],
             security,

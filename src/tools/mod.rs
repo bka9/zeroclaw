@@ -553,20 +553,41 @@ pub fn all_tools_with_runtime(
         } else {
             root_config.x.bearer_token.trim().to_string()
         };
-        let access_token = if root_config.x.access_token.trim().is_empty() {
+        let consumer_key = if root_config.x.consumer_key.trim().is_empty() {
+            std::env::var("X_CONSUMER_KEY").unwrap_or_default()
+        } else {
+            root_config.x.consumer_key.trim().to_string()
+        };
+        let consumer_secret = if root_config.x.consumer_secret.trim().is_empty() {
+            std::env::var("X_CONSUMER_SECRET").unwrap_or_default()
+        } else {
+            root_config.x.consumer_secret.trim().to_string()
+        };
+        let oauth_token = if root_config.x.oauth_token.trim().is_empty() {
             std::env::var("X_ACCESS_TOKEN").unwrap_or_default()
         } else {
-            root_config.x.access_token.trim().to_string()
+            root_config.x.oauth_token.trim().to_string()
         };
-        if bearer_token.trim().is_empty() && access_token.trim().is_empty() {
+        let oauth_token_secret = if root_config.x.oauth_token_secret.trim().is_empty() {
+            std::env::var("X_ACCESS_TOKEN_SECRET").unwrap_or_default()
+        } else {
+            root_config.x.oauth_token_secret.trim().to_string()
+        };
+        if bearer_token.trim().is_empty()
+            && consumer_key.trim().is_empty()
+            && oauth_token.trim().is_empty()
+        {
             tracing::warn!(
                 "X tool enabled but no tokens found (set x.bearer_token / X_BEARER_TOKEN \
-                 or x.access_token / X_ACCESS_TOKEN env var)"
+                 or x.consumer_key / X_CONSUMER_KEY + x.oauth_token / X_ACCESS_TOKEN env vars)"
             );
         } else {
             tool_arcs.push(Arc::new(XTool::new(
                 bearer_token,
-                access_token,
+                consumer_key,
+                consumer_secret,
+                oauth_token,
+                oauth_token_secret,
                 root_config.x.user_id.trim().to_string(),
                 root_config.x.allowed_actions.clone(),
                 security.clone(),
