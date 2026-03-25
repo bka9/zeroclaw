@@ -58,6 +58,7 @@ RUN rm -rf src benches
 # 2. Copy source and build the real binary
 COPY src/ src/
 COPY benches/ benches/
+COPY firmware/ firmware/
 COPY --from=web-builder /web/dist web/dist
 COPY *.rs .
 RUN touch src/main.rs
