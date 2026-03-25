@@ -1,4 +1,4 @@
-use super::types::{CategoryInput, TransactionInput, TransactionListParams};
+use super::types::{CategoryInput, TransactionInput, TransactionListParams, TransactionUpdateInput};
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -24,7 +24,7 @@ pub trait BudgetProvider: Send + Sync {
         &self,
         budget_id: &str,
         transaction_id: &str,
-        txn: &TransactionInput,
+        txn: &TransactionUpdateInput,
     ) -> anyhow::Result<Value>;
     async fn transactions_import(&self, budget_id: &str) -> anyhow::Result<Value>;
 

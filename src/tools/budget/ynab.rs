@@ -1,5 +1,5 @@
 use super::traits::BudgetProvider;
-use super::types::{CategoryInput, TransactionInput, TransactionListParams};
+use super::types::{CategoryInput, TransactionInput, TransactionListParams, TransactionUpdateInput};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -200,18 +200,21 @@ impl BudgetProvider for YnabProvider {
         &self,
         budget_id: &str,
         transaction_id: &str,
-        txn: &TransactionInput,
+        txn: &TransactionUpdateInput,
     ) -> anyhow::Result<Value> {
         let id = encode_segment(budget_id);
         let tid = encode_segment(transaction_id);
-        let mut body = json!({
-            "transaction": {
-                "account_id": txn.account_id,
-                "date": txn.date,
-                "amount": txn.amount,
-            }
-        });
+        let mut body = json!({ "transaction": {} });
         let txn_obj = body["transaction"].as_object_mut().unwrap();
+        if let Some(ref v) = txn.account_id {
+            txn_obj.insert("account_id".into(), json!(v));
+        }
+        if let Some(ref v) = txn.date {
+            txn_obj.insert("date".into(), json!(v));
+        }
+        if let Some(v) = txn.amount {
+            txn_obj.insert("amount".into(), json!(v));
+        }
         if let Some(ref v) = txn.payee_name {
             txn_obj.insert("payee_name".into(), json!(v));
         }

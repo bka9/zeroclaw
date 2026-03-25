@@ -12,12 +12,27 @@ pub struct TransactionListParams {
     pub last_knowledge_of_server: Option<i64>,
 }
 
-/// Input fields for creating or updating a transaction.
+/// Input fields for creating a transaction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransactionInput {
     pub account_id: String,
     pub date: String,
     pub amount: i64,
+    pub payee_name: Option<String>,
+    pub payee_id: Option<String>,
+    pub category_id: Option<String>,
+    pub memo: Option<String>,
+    pub cleared: Option<String>,
+    pub approved: Option<bool>,
+    pub flag_color: Option<String>,
+}
+
+/// Input fields for updating a transaction. All fields are optional.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransactionUpdateInput {
+    pub account_id: Option<String>,
+    pub date: Option<String>,
+    pub amount: Option<i64>,
     pub payee_name: Option<String>,
     pub payee_id: Option<String>,
     pub category_id: Option<String>,

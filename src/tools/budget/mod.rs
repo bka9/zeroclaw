@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use traits::BudgetProvider;
-use types::{CategoryInput, TransactionInput, TransactionListParams};
+use types::{CategoryInput, TransactionInput, TransactionListParams, TransactionUpdateInput};
 
 const MAX_ERROR_BODY_CHARS: usize = 500;
 
@@ -112,7 +112,7 @@ impl BudgetTool {
         let transaction_id = args["transaction_id"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing required parameter: transaction_id"))?;
-        let txn = parse_transaction_input(args)?;
+        let txn = parse_transaction_update_input(args);
         let data = self
             .provider
             .transactions_update(&id, transaction_id, &txn)
@@ -422,6 +422,21 @@ fn parse_transaction_input(args: &Value) -> anyhow::Result<TransactionInput> {
         approved: args["approved"].as_bool(),
         flag_color: args["flag_color"].as_str().map(String::from),
     })
+}
+
+fn parse_transaction_update_input(args: &Value) -> TransactionUpdateInput {
+    TransactionUpdateInput {
+        account_id: args["account_id"].as_str().map(String::from),
+        date: args["date"].as_str().map(String::from),
+        amount: args["amount"].as_i64(),
+        payee_name: args["payee_name"].as_str().map(String::from),
+        payee_id: args["payee_id"].as_str().map(String::from),
+        category_id: args["category_id"].as_str().map(String::from),
+        memo: args["memo"].as_str().map(String::from),
+        cleared: args["cleared"].as_str().map(String::from),
+        approved: args["approved"].as_bool(),
+        flag_color: args["flag_color"].as_str().map(String::from),
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
