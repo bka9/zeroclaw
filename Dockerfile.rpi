@@ -45,10 +45,12 @@ ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
 COPY Cargo.toml Cargo.lock ./
 COPY crates/robot-kit/ crates/robot-kit/
 COPY crates/aardvark-sys/ crates/aardvark-sys/
-RUN mkdir -p src benches \
+COPY apps/tauri/Cargo.toml apps/tauri/Cargo.toml
+RUN mkdir -p src benches apps/tauri/src \
     && echo "fn main() {}" > src/main.rs \
     && echo "" > src/lib.rs \
-    && echo "fn main() {}" > benches/agent_benchmarks.rs
+    && echo "fn main() {}" > benches/agent_benchmarks.rs \
+    && echo "fn main() {}" > apps/tauri/src/main.rs
 RUN --mount=type=cache,id=rpi-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=rpi-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=rpi-target,target=/app/target,sharing=locked \
