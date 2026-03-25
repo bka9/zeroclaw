@@ -8,7 +8,7 @@ pub use schema::{
     build_channel_proxy_client_with_timeouts, build_runtime_proxy_client,
     build_runtime_proxy_client_with_timeouts, runtime_proxy_config, set_runtime_proxy_config,
     AgentConfig, AssemblyAiSttConfig, AuditConfig, AutonomyConfig, BackupConfig,
-    BrowserComputerUseConfig, BrowserConfig, BuiltinHooksConfig, ChannelsConfig,
+    BrowserComputerUseConfig, BrowserConfig, BudgetConfig, BuiltinHooksConfig, ChannelsConfig,
     ClassificationRule, ClaudeCodeConfig, CloudOpsConfig, ComposioConfig, Config,
     ConversationalAiConfig, CostConfig, CronConfig, CronJobDecl, CronScheduleDecl,
     DataRetentionConfig, DeepgramSttConfig, DelegateAgentConfig, DelegateToolConfig, DiscordConfig,

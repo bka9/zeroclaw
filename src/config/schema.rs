@@ -353,6 +353,10 @@ pub struct Config {
     #[serde(default)]
     pub x: XConfig,
 
+    /// Budget / financial-planning integration configuration (`[budget]`).
+    #[serde(default)]
+    pub budget: BudgetConfig,
+
     /// FatSecret nutrition integration configuration (`[nutrition]`).
     #[serde(default)]
     pub nutrition: NutritionConfig,
@@ -6997,6 +7001,73 @@ impl Default for XUsageConfig {
 /// `auth_secret` obtained from FatSecret's `profile.create` call.
 ///
 /// ## Defaults
+/// Budget / financial-planning integration configuration.
+///
+/// Defaults:
+/// - `enabled`: `false`
+/// - `provider`: `"ynab"`
+/// - `allowed_actions`: read-only actions only
+/// - `timeout_secs`: `30`
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BudgetConfig {
+    /// Enable the `budget` tool. Default: `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Budget provider backend. Currently only `"ynab"` is supported.
+    #[serde(default = "default_budget_provider")]
+    pub provider: String,
+    /// API token for the budget provider. Encrypted at rest.
+    /// Falls back to `YNAB_API_TOKEN` env var.
+    #[serde(default)]
+    pub api_token: String,
+    /// Default budget ID (UUID, `"last-used"`, or `"default"`). Optional.
+    #[serde(default)]
+    pub default_budget_id: String,
+    /// Actions the agent is permitted to call. Defaults to read-only actions.
+    #[serde(default = "default_budget_allowed_actions")]
+    pub allowed_actions: Vec<String>,
+    /// Request timeout in seconds. Default: `30`.
+    #[serde(default = "default_budget_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_budget_provider() -> String {
+    "ynab".to_string()
+}
+
+fn default_budget_allowed_actions() -> Vec<String> {
+    vec![
+        "budgets.list".to_string(),
+        "budgets.get".to_string(),
+        "budgets.summary".to_string(),
+        "transactions.list".to_string(),
+        "user.get".to_string(),
+        "accounts.list".to_string(),
+        "accounts.get".to_string(),
+        "categories.list".to_string(),
+        "categories.get".to_string(),
+        "payees.list".to_string(),
+        "payees.get".to_string(),
+    ]
+}
+
+fn default_budget_timeout_secs() -> u64 {
+    30
+}
+
+impl Default for BudgetConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: default_budget_provider(),
+            api_token: String::new(),
+            default_budget_id: String::new(),
+            allowed_actions: default_budget_allowed_actions(),
+            timeout_secs: default_budget_timeout_secs(),
+        }
+    }
+}
+
 /// - `enabled`: `false`
 /// - `allowed_actions`: `["item.search", "item.get"]` — read-only by default.
 /// - `timeout_secs`: `30`
@@ -7413,6 +7484,7 @@ impl Default for Config {
             notion: NotionConfig::default(),
             jira: JiraConfig::default(),
             x: XConfig::default(),
+            budget: BudgetConfig::default(),
             nutrition: NutritionConfig::default(),
             health: HealthConfig::default(),
             node_transport: NodeTransportConfig::default(),
@@ -8394,13 +8466,18 @@ impl Config {
                 )?;
             }
 
-            // X (Twitter) secrets
-            if !config.x.bearer_token.is_empty() {
+            // Budget secrets
+            if !config.budget.api_token.is_empty() {
                 decrypt_secret(
                     &store,
-                    &mut config.x.bearer_token,
-                    "config.x.bearer_token",
+                    &mut config.budget.api_token,
+                    "config.budget.api_token",
                 )?;
+            }
+
+            // X (Twitter) secrets
+            if !config.x.bearer_token.is_empty() {
+                decrypt_secret(&store, &mut config.x.bearer_token, "config.x.bearer_token")?;
             }
             if !config.x.consumer_secret.is_empty() {
                 decrypt_secret(
@@ -8410,11 +8487,7 @@ impl Config {
                 )?;
             }
             if !config.x.oauth_token.is_empty() {
-                decrypt_secret(
-                    &store,
-                    &mut config.x.oauth_token,
-                    "config.x.oauth_token",
-                )?;
+                decrypt_secret(&store, &mut config.x.oauth_token, "config.x.oauth_token")?;
             }
             if !config.x.oauth_token_secret.is_empty() {
                 decrypt_secret(
@@ -9082,6 +9155,48 @@ impl Config {
                         "jira.allowed_actions contains unknown action: '{}'. \
                          Valid: get_ticket, search_tickets, comment_ticket",
                         action
+                    );
+                }
+            }
+        }
+
+        // Budget
+        if self.budget.enabled {
+            if self.budget.api_token.trim().is_empty()
+                && std::env::var("YNAB_API_TOKEN")
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty()
+            {
+                anyhow::bail!(
+                    "budget.api_token must be set (or YNAB_API_TOKEN env var) \
+                     when budget.enabled = true"
+                );
+            }
+            let valid_actions = [
+                "budgets.list",
+                "budgets.get",
+                "budgets.summary",
+                "transactions.list",
+                "transactions.create",
+                "transactions.update",
+                "transactions.import",
+                "user.get",
+                "accounts.list",
+                "accounts.get",
+                "categories.list",
+                "categories.get",
+                "categories.create",
+                "payees.list",
+                "payees.get",
+            ];
+            for action in &self.budget.allowed_actions {
+                if !valid_actions.contains(&action.as_str()) {
+                    anyhow::bail!(
+                        "budget.allowed_actions contains unknown action: '{}'. \
+                         Valid: {}",
+                        action,
+                        valid_actions.join(", ")
                     );
                 }
             }
@@ -9980,6 +10095,15 @@ impl Config {
             )?;
         }
 
+        // Budget secrets
+        if !config_to_save.budget.api_token.is_empty() {
+            encrypt_secret(
+                &store,
+                &mut config_to_save.budget.api_token,
+                "config.budget.api_token",
+            )?;
+        }
+
         // X (Twitter) secrets
         if !config_to_save.x.bearer_token.is_empty() {
             encrypt_secret(
@@ -10598,6 +10722,7 @@ default_temperature = 0.7
             notion: NotionConfig::default(),
             jira: JiraConfig::default(),
             x: XConfig::default(),
+            budget: BudgetConfig::default(),
             nutrition: NutritionConfig::default(),
             health: HealthConfig::default(),
             node_transport: NodeTransportConfig::default(),
@@ -11118,6 +11243,7 @@ default_temperature = 0.7
             notion: NotionConfig::default(),
             jira: JiraConfig::default(),
             x: XConfig::default(),
+            budget: BudgetConfig::default(),
             nutrition: NutritionConfig::default(),
             health: HealthConfig::default(),
             node_transport: NodeTransportConfig::default(),
