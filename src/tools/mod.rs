@@ -20,6 +20,7 @@ pub mod backup_tool;
 pub mod browser;
 pub mod browser_delegate;
 pub mod browser_open;
+pub mod budget;
 pub mod calculator;
 pub mod canvas;
 pub mod claude_code;
@@ -720,6 +721,48 @@ pub fn all_tools_with_runtime(
                 security.clone(),
                 root_config.nutrition.timeout_secs,
             )));
+        }
+    }
+
+    // Budget / YNAB integration (config-gated)
+    if root_config.budget.enabled {
+        let api_token = if root_config.budget.api_token.trim().is_empty() {
+            std::env::var("YNAB_API_TOKEN").unwrap_or_default()
+        } else {
+            root_config.budget.api_token.trim().to_string()
+        };
+        if api_token.trim().is_empty() {
+            tracing::warn!(
+                "Budget tool enabled but no api_token found \
+                 (set budget.api_token or YNAB_API_TOKEN env var)"
+            );
+        } else {
+            let provider: Option<Box<dyn budget::traits::BudgetProvider>> =
+                match root_config.budget.provider.as_str() {
+                    "ynab" | "" => Some(Box::new(budget::ynab::YnabProvider::new(
+                        api_token,
+                        root_config.budget.timeout_secs,
+                    ))),
+                    other => {
+                        tracing::warn!("Unknown budget provider '{other}', skipping registration");
+                        None
+                    }
+                };
+
+            if let Some(provider) = provider {
+                let default_budget_id = if root_config.budget.default_budget_id.trim().is_empty() {
+                    None
+                } else {
+                    Some(root_config.budget.default_budget_id.trim().to_string())
+                };
+
+                tool_arcs.push(Arc::new(budget::BudgetTool::new(
+                    provider,
+                    root_config.budget.allowed_actions.clone(),
+                    security.clone(),
+                    default_budget_id,
+                )));
+            }
         }
     }
 

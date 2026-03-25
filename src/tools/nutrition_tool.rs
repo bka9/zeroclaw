@@ -107,8 +107,7 @@ impl NutritionTool {
         all_params.insert("oauth_version".to_string(), "1.0".to_string());
 
         // 2-legged: empty token secret.
-        let signature =
-            compute_oauth1_signature("GET", &url, &all_params, &self.client_secret, "");
+        let signature = compute_oauth1_signature("GET", &url, &all_params, &self.client_secret, "");
         all_params.insert("oauth_signature".to_string(), signature);
 
         let auth_header = build_oauth1_auth_header(&all_params);
