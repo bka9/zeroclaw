@@ -8365,6 +8365,13 @@ impl Config {
             }
 
             // Nutrition (FatSecret) secrets
+            if !config.nutrition.client_id.is_empty() {
+                decrypt_secret(
+                    &store,
+                    &mut config.nutrition.client_id,
+                    "config.nutrition.client_id",
+                )?;
+            }
             if !config.nutrition.client_secret.is_empty() {
                 decrypt_secret(
                     &store,
@@ -9944,6 +9951,13 @@ impl Config {
         }
 
         // Nutrition (FatSecret) secrets
+        if !config_to_save.nutrition.client_id.is_empty() {
+            encrypt_secret(
+                &store,
+                &mut config_to_save.nutrition.client_id,
+                "config.nutrition.client_id",
+            )?;
+        }
         if !config_to_save.nutrition.client_secret.is_empty() {
             encrypt_secret(
                 &store,
