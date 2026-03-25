@@ -47,6 +47,7 @@ pub mod gemini_cli;
 pub mod git_operations;
 pub mod glob_search;
 pub mod google_workspace;
+pub mod issue_tracker;
 #[cfg(feature = "hardware")]
 pub mod hardware_board_info;
 #[cfg(feature = "hardware")]
@@ -763,6 +764,50 @@ pub fn all_tools_with_runtime(
                     default_budget_id,
                 )));
             }
+        }
+    }
+
+    // Issue tracker / Beads integration (config-gated)
+    if root_config.issue_tracker.enabled {
+        let provider: Option<Box<dyn issue_tracker::traits::IssueTrackerProvider>> =
+            match root_config.issue_tracker.provider.as_str() {
+                "beads" | "" => {
+                    let bd_path = if root_config.issue_tracker.bd_path.trim().is_empty() {
+                        "bd".to_string()
+                    } else {
+                        root_config.issue_tracker.bd_path.trim().to_string()
+                    };
+                    let db_path = if root_config.issue_tracker.db_path.trim().is_empty() {
+                        None
+                    } else {
+                        Some(root_config.issue_tracker.db_path.trim().to_string())
+                    };
+                    let actor = if root_config.issue_tracker.actor.trim().is_empty() {
+                        None
+                    } else {
+                        Some(root_config.issue_tracker.actor.trim().to_string())
+                    };
+                    Some(Box::new(issue_tracker::beads::BeadsProvider::new(
+                        bd_path,
+                        db_path,
+                        actor,
+                        root_config.issue_tracker.timeout_secs,
+                    )))
+                }
+                other => {
+                    tracing::warn!(
+                        "Unknown issue_tracker provider '{other}', skipping registration"
+                    );
+                    None
+                }
+            };
+
+        if let Some(provider) = provider {
+            tool_arcs.push(Arc::new(issue_tracker::IssueTrackerTool::new(
+                provider,
+                root_config.issue_tracker.allowed_actions.clone(),
+                security.clone(),
+            )));
         }
     }
 

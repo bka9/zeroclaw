@@ -374,6 +374,10 @@ pub struct Config {
     #[serde(default)]
     pub budget: BudgetConfig,
 
+    /// Issue tracker integration configuration (`[issue_tracker]`).
+    #[serde(default)]
+    pub issue_tracker: IssueTrackerConfig,
+
     /// FatSecret nutrition integration configuration (`[nutrition]`).
     #[serde(default)]
     pub nutrition: NutritionConfig,
@@ -8094,6 +8098,75 @@ impl Default for BudgetConfig {
     }
 }
 
+/// Issue-tracker integration configuration.
+///
+/// Defaults:
+/// - `enabled`: `false`
+/// - `provider`: `"beads"`
+/// - `allowed_actions`: read-only actions only
+/// - `timeout_secs`: `30`
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct IssueTrackerConfig {
+    /// Enable the `issue_tracker` tool. Default: `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Issue-tracker provider backend. Currently only `"beads"` is supported.
+    #[serde(default = "default_issue_tracker_provider")]
+    pub provider: String,
+    /// Path to the `bd` binary. Default: `"bd"` (PATH lookup).
+    #[serde(default = "default_issue_tracker_bd_path")]
+    pub bd_path: String,
+    /// Path to the Beads/Dolt database directory. Empty = use `bd` default.
+    #[serde(default)]
+    pub db_path: String,
+    /// Actor name for audit trail. Empty = use `bd` default.
+    #[serde(default)]
+    pub actor: String,
+    /// Actions the agent is permitted to call. Defaults to read-only actions.
+    #[serde(default = "default_issue_tracker_allowed_actions")]
+    pub allowed_actions: Vec<String>,
+    /// Command timeout in seconds. Default: `30`.
+    #[serde(default = "default_issue_tracker_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_issue_tracker_provider() -> String {
+    "beads".to_string()
+}
+
+fn default_issue_tracker_bd_path() -> String {
+    "bd".to_string()
+}
+
+fn default_issue_tracker_allowed_actions() -> Vec<String> {
+    vec![
+        "epic.get".to_string(),
+        "issue.get".to_string(),
+        "issue.next".to_string(),
+        "issue.list".to_string(),
+        "dep.tree".to_string(),
+        "sync.status".to_string(),
+    ]
+}
+
+fn default_issue_tracker_timeout_secs() -> u64 {
+    30
+}
+
+impl Default for IssueTrackerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: default_issue_tracker_provider(),
+            bd_path: default_issue_tracker_bd_path(),
+            db_path: String::new(),
+            actor: String::new(),
+            allowed_actions: default_issue_tracker_allowed_actions(),
+            timeout_secs: default_issue_tracker_timeout_secs(),
+        }
+    }
+}
+
 /// - `enabled`: `false`
 /// - `allowed_actions`: `["item.search", "item.get"]` — read-only by default.
 /// - `timeout_secs`: `30`
@@ -8514,6 +8587,7 @@ impl Default for Config {
             jira: JiraConfig::default(),
             x: XConfig::default(),
             budget: BudgetConfig::default(),
+            issue_tracker: IssueTrackerConfig::default(),
             nutrition: NutritionConfig::default(),
             health: HealthConfig::default(),
             node_transport: NodeTransportConfig::default(),
@@ -11929,6 +12003,7 @@ auto_save = true
             jira: JiraConfig::default(),
             x: XConfig::default(),
             budget: BudgetConfig::default(),
+            issue_tracker: IssueTrackerConfig::default(),
             nutrition: NutritionConfig::default(),
             health: HealthConfig::default(),
             node_transport: NodeTransportConfig::default(),
@@ -12459,6 +12534,7 @@ default_temperature = 0.7
             jira: JiraConfig::default(),
             x: XConfig::default(),
             budget: BudgetConfig::default(),
+            issue_tracker: IssueTrackerConfig::default(),
             nutrition: NutritionConfig::default(),
             health: HealthConfig::default(),
             node_transport: NodeTransportConfig::default(),
