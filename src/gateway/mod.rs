@@ -21,8 +21,9 @@ pub mod tls;
 pub mod ws;
 
 use crate::channels::{
-    session_backend::SessionBackend, session_sqlite::SqliteSessionBackend, Channel,
-    GmailPushChannel, LinqChannel, NextcloudTalkChannel, SendMessage, WatiChannel, WhatsAppChannel,
+    session_backend::SessionBackend, session_sqlite::SqliteSessionBackend, AgentPhoneChannel,
+    Channel, GmailPushChannel, LinqChannel, NextcloudTalkChannel, SendMessage, WatiChannel,
+    WhatsAppChannel,
 };
 use crate::config::Config;
 use crate::cost::CostTracker;
@@ -95,6 +96,10 @@ fn wati_memory_key(msg: &crate::channels::traits::ChannelMessage) -> String {
 
 fn nextcloud_talk_memory_key(msg: &crate::channels::traits::ChannelMessage) -> String {
     format!("nextcloud_talk_{}_{}", msg.sender, msg.id)
+}
+
+fn agentphone_memory_key(msg: &crate::channels::traits::ChannelMessage) -> String {
+    format!("agentphone_{}_{}", msg.sender, msg.id)
 }
 
 fn sender_session_id(channel: &str, msg: &crate::channels::traits::ChannelMessage) -> String {
@@ -341,6 +346,8 @@ pub struct AppState {
     /// Nextcloud Talk webhook secret for signature verification
     pub nextcloud_talk_webhook_secret: Option<Arc<str>>,
     pub wati: Option<Arc<WatiChannel>>,
+    /// AgentPhone telephony channel (SMS + voice webhooks)
+    pub agentphone: Option<Arc<AgentPhoneChannel>>,
     /// Gmail Pub/Sub push notification channel
     pub gmail_push: Option<Arc<GmailPushChannel>>,
     /// Observability backend for metrics scraping
@@ -669,6 +676,38 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .filter(|gp| gp.enabled)
         .map(|gp| Arc::new(GmailPushChannel::new(gp.clone())));
 
+    // AgentPhone channel (if configured)
+    let agentphone_channel: Option<Arc<AgentPhoneChannel>> = config
+        .channels_config
+        .agentphone
+        .as_ref()
+        .map(|ap_cfg| {
+            let api_key = ap_cfg
+                .api_key
+                .clone()
+                .unwrap_or_else(|| {
+                    config.agentphone.api_key.clone()
+                })
+                .trim()
+                .to_string();
+            let webhook_secret = ap_cfg
+                .webhook_secret
+                .clone()
+                .or_else(|| std::env::var("AGENTPHONE_WEBHOOK_SECRET").ok())
+                .unwrap_or_default();
+            Arc::new(
+                AgentPhoneChannel::new(
+                    api_key,
+                    webhook_secret,
+                    ap_cfg.allowed_numbers.clone(),
+                )
+                .with_agent_id(ap_cfg.agent_id.clone())
+                .with_voice(ap_cfg.voice.clone())
+                .with_begin_message(ap_cfg.begin_message.clone())
+                .with_proxy_url(ap_cfg.proxy_url.clone()),
+            )
+        });
+
     // ── Session persistence for WS chat ─────────────────────
     let session_backend: Option<Arc<dyn SessionBackend>> = if config.gateway.session_persistence {
         match SqliteSessionBackend::new(&config.workspace_dir) {
@@ -858,6 +897,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         nextcloud_talk: nextcloud_talk_channel,
         nextcloud_talk_webhook_secret,
         wati: wati_channel,
+        agentphone: agentphone_channel,
         gmail_push: gmail_push_channel,
         observer: broadcast_observer,
         tools_registry,
@@ -928,6 +968,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/wati", post(handle_wati_webhook))
         .route("/nextcloud-talk", post(handle_nextcloud_talk_webhook))
         .route("/webhook/gmail", post(handle_gmail_push_webhook))
+        .route("/agentphone", post(handle_agentphone_webhook))
         // ── Claude Code runner hooks ──
         .route("/hooks/claude-code", post(api::handle_claude_code_hook))
         // ── Web Dashboard API routes ──
@@ -1691,6 +1732,158 @@ async fn handle_whatsapp_message(
     }
 
     // Acknowledge the webhook
+    (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+}
+
+/// POST /agentphone — incoming SMS and voice transcript webhook from AgentPhone
+async fn handle_agentphone_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let Some(ref ap) = state.agentphone else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "AgentPhone not configured"})),
+        );
+    };
+
+    // ── Security: Verify X-Webhook-Signature with HMAC-SHA256 ──
+    let signature = headers
+        .get("X-Webhook-Signature")
+        .and_then(|v| v.to_str().ok());
+    let timestamp = headers
+        .get("X-Webhook-Timestamp")
+        .and_then(|v| v.to_str().ok());
+
+    if !ap.verify_signature(&body, signature, timestamp) {
+        tracing::warn!(
+            "AgentPhone webhook signature verification failed (signature: {})",
+            if signature.is_none() {
+                "missing"
+            } else {
+                "invalid"
+            }
+        );
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Invalid signature"})),
+        );
+    }
+
+    // Parse JSON body
+    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid JSON payload"})),
+        );
+    };
+
+    // Check if this is a voice call from an unauthorized number — respond with hangup
+    let channel_type = payload
+        .get("channel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if channel_type == "voice" {
+        if let Some(from) = payload
+            .get("data")
+            .and_then(|d| d.get("from"))
+            .and_then(|v| v.as_str())
+        {
+            let normalized = if from.starts_with('+') {
+                from.to_string()
+            } else {
+                format!("+{from}")
+            };
+            if !ap.is_number_allowed(&normalized) {
+                tracing::warn!(
+                    "AgentPhone: hanging up voice call from unauthorized number: {normalized}"
+                );
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({"hangup": true})),
+                );
+            }
+        }
+    }
+
+    // Parse messages from the webhook payload
+    let messages = ap.parse_webhook_payload(&payload);
+
+    if messages.is_empty() {
+        return (StatusCode::OK, Json(serde_json::json!({"status": "ok"})));
+    }
+
+    // For voice webhooks, we need to return the response text directly.
+    // For SMS, we process asynchronously and send via the channel.
+    let is_voice = channel_type == "voice";
+
+    for msg in &messages {
+        tracing::info!(
+            "AgentPhone {} from {}: {}",
+            channel_type,
+            msg.sender,
+            truncate_with_ellipsis(&msg.content, 50)
+        );
+        let session_id = sender_session_id("agentphone", msg);
+
+        // Auto-save to memory
+        if state.auto_save && !memory::should_skip_autosave_content(&msg.content) {
+            let key = agentphone_memory_key(msg);
+            let _ = state
+                .mem
+                .store(
+                    &key,
+                    &msg.content,
+                    MemoryCategory::Conversation,
+                    Some(&session_id),
+                )
+                .await;
+        }
+
+        match Box::pin(run_gateway_chat_with_tools(
+            &state,
+            &msg.content,
+            Some(&session_id),
+        ))
+        .await
+        {
+            Ok(response) => {
+                if is_voice {
+                    // For voice: return response text directly so AgentPhone TTS speaks it
+                    return (
+                        StatusCode::OK,
+                        Json(serde_json::json!({"text": response})),
+                    );
+                }
+                // For SMS: send reply via the channel
+                if let Err(e) = ap
+                    .send(&SendMessage::new(response, &msg.reply_target))
+                    .await
+                {
+                    tracing::error!("Failed to send AgentPhone reply: {e}");
+                }
+            }
+            Err(e) => {
+                tracing::error!("LLM error for AgentPhone message: {e:#}");
+                if is_voice {
+                    return (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "text": "Sorry, I couldn't process your request right now."
+                        })),
+                    );
+                }
+                let _ = ap
+                    .send(&SendMessage::new(
+                        "Sorry, I couldn't process your message right now.",
+                        &msg.reply_target,
+                    ))
+                    .await;
+            }
+        }
+    }
+
     (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
 }
 
@@ -2546,6 +2739,7 @@ mod tests {
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            agentphone: None,
             gmail_push: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
@@ -2614,6 +2808,7 @@ mod tests {
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            agentphone: None,
             gmail_push: None,
             observer,
             tools_registry: Arc::new(Vec::new()),
@@ -3008,6 +3203,7 @@ mod tests {
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            agentphone: None,
             gmail_push: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
@@ -3086,6 +3282,7 @@ mod tests {
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            agentphone: None,
             gmail_push: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
@@ -3176,6 +3373,7 @@ mod tests {
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            agentphone: None,
             gmail_push: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
@@ -3238,6 +3436,7 @@ mod tests {
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            agentphone: None,
             gmail_push: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
@@ -3305,6 +3504,7 @@ mod tests {
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            agentphone: None,
             gmail_push: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
@@ -3377,6 +3577,7 @@ mod tests {
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            agentphone: None,
             gmail_push: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
@@ -3445,6 +3646,7 @@ mod tests {
             nextcloud_talk: Some(channel),
             nextcloud_talk_webhook_secret: Some(Arc::from(secret)),
             wati: None,
+            agentphone: None,
             gmail_push: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),

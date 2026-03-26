@@ -15,6 +15,7 @@
 //! [`start_channels`]. See `AGENTS.md` §7.2 for the full change playbook.
 
 pub mod acp_server;
+pub mod agentphone;
 pub mod bluesky;
 pub mod clawdtalk;
 pub mod cli;
@@ -62,6 +63,7 @@ pub mod whatsapp_storage;
 #[cfg(feature = "whatsapp-web")]
 pub mod whatsapp_web;
 
+pub use agentphone::AgentPhoneChannel;
 pub use bluesky::BlueskyChannel;
 pub use clawdtalk::{ClawdTalkChannel, ClawdTalkConfig};
 pub use cli::CliChannel;
@@ -4670,6 +4672,28 @@ fn collect_configured_channels(
                 wh.auth_header.clone(),
                 wh.secret.clone(),
             )),
+        });
+    }
+
+    if let Some(ref ap) = config.channels_config.agentphone {
+        let api_key = ap
+            .api_key
+            .clone()
+            .unwrap_or_else(|| config.agentphone.api_key.clone());
+        let webhook_secret = ap
+            .webhook_secret
+            .clone()
+            .or_else(|| std::env::var("AGENTPHONE_WEBHOOK_SECRET").ok())
+            .unwrap_or_default();
+        channels.push(ConfiguredChannel {
+            display_name: "AgentPhone",
+            channel: Arc::new(
+                AgentPhoneChannel::new(api_key, webhook_secret, ap.allowed_numbers.clone())
+                    .with_agent_id(ap.agent_id.clone())
+                    .with_voice(ap.voice.clone())
+                    .with_begin_message(ap.begin_message.clone())
+                    .with_proxy_url(ap.proxy_url.clone()),
+            ),
         });
     }
 
