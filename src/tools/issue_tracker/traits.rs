@@ -1,4 +1,7 @@
-use super::types::{DepAddInput, EpicCreateInput, EpicUpdateInput, IssueCreateInput, IssueListParams, IssueUpdateInput};
+use super::types::{
+    DepAddInput, EpicCreateInput, EpicUpdateInput, IssueCommentInput, IssueCreateInput,
+    IssueListParams, IssueUpdateInput,
+};
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -17,15 +20,13 @@ pub trait IssueTrackerProvider: Send + Sync {
     // ── Issues ─────────────────────────────────────────────────
     async fn issue_create(&self, input: &IssueCreateInput) -> anyhow::Result<Value>;
     async fn issue_get(&self, issue_id: &str) -> anyhow::Result<Value>;
-    async fn issue_update(
-        &self,
-        issue_id: &str,
-        input: &IssueUpdateInput,
-    ) -> anyhow::Result<Value>;
+    async fn issue_update(&self, issue_id: &str, input: &IssueUpdateInput)
+        -> anyhow::Result<Value>;
     async fn issue_delete(&self, issue_id: &str, reason: Option<&str>) -> anyhow::Result<Value>;
     async fn issue_next(&self) -> anyhow::Result<Value>;
     async fn issue_assign(&self, issue_id: &str, assignee: &str) -> anyhow::Result<Value>;
     async fn issue_list(&self, params: &IssueListParams) -> anyhow::Result<Value>;
+    async fn issue_comment(&self, input: &IssueCommentInput) -> anyhow::Result<Value>;
 
     // ── Dependencies ───────────────────────────────────────────
     async fn dep_add(&self, input: &DepAddInput) -> anyhow::Result<Value>;

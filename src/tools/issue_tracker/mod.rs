@@ -9,8 +9,8 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use traits::IssueTrackerProvider;
 use types::{
-    DepAddInput, EpicCreateInput, EpicUpdateInput, IssueCreateInput, IssueListParams,
-    IssueUpdateInput,
+    DepAddInput, EpicCreateInput, EpicUpdateInput, IssueCommentInput, IssueCreateInput,
+    IssueListParams, IssueUpdateInput,
 };
 
 const MAX_ERROR_BODY_CHARS: usize = 500;
@@ -29,6 +29,7 @@ const MAX_ERROR_BODY_CHARS: usize = 500;
 /// - `issue.next`    — get the next unblocked issue
 /// - `issue.assign`  — assign an issue to a team member
 /// - `issue.list`    — list/filter issues
+/// - `issue.comment` — add a comment to an issue or epic
 /// - `dep.add`       — add a dependency between issues
 /// - `dep.remove`    — remove a dependency
 /// - `dep.tree`      — show dependency tree
@@ -154,6 +155,17 @@ impl IssueTrackerTool {
         Ok(success_result(data))
     }
 
+    async fn handle_issue_comment(&self, args: &Value) -> anyhow::Result<ToolResult> {
+        let issue_id = require_str(args, "issue_id")?;
+        let body = require_str(args, "body")?;
+        let input = IssueCommentInput {
+            issue_id: issue_id.to_string(),
+            body: body.to_string(),
+        };
+        let data = self.provider.issue_comment(&input).await?;
+        Ok(success_result(data))
+    }
+
     async fn handle_issue_list(&self, args: &Value) -> anyhow::Result<ToolResult> {
         let params = IssueListParams {
             status: args["status"].as_str().map(String::from),
@@ -234,7 +246,7 @@ impl Tool for IssueTrackerTool {
                     "enum": [
                         "epic.create", "epic.get", "epic.update", "epic.delete",
                         "issue.create", "issue.get", "issue.update", "issue.delete",
-                        "issue.next", "issue.assign", "issue.list",
+                        "issue.next", "issue.assign", "issue.list", "issue.comment",
                         "dep.add", "dep.remove", "dep.tree",
                         "sync.push", "sync.pull", "sync.status"
                     ],
@@ -338,8 +350,9 @@ impl Tool for IssueTrackerTool {
 
         // Determine operation type.
         let op = match action {
-            "epic.get" | "issue.get" | "issue.next" | "issue.list" | "dep.tree"
-            | "sync.status" => ToolOperation::Read,
+            "epic.get" | "issue.get" | "issue.next" | "issue.list" | "dep.tree" | "sync.status" => {
+                ToolOperation::Read
+            }
             _ => ToolOperation::Act,
         };
         if let Err(error) = self.security.enforce_tool_operation(op, "issue_tracker") {
@@ -362,6 +375,7 @@ impl Tool for IssueTrackerTool {
             "issue.next" => self.handle_issue_next().await,
             "issue.assign" => self.handle_issue_assign(&args).await,
             "issue.list" => self.handle_issue_list(&args).await,
+            "issue.comment" => self.handle_issue_comment(&args).await,
             "dep.add" => self.handle_dep_add(&args).await,
             "dep.remove" => self.handle_dep_remove(&args).await,
             "dep.tree" => self.handle_dep_tree(&args).await,

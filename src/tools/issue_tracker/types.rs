@@ -46,6 +46,15 @@ pub struct IssueUpdateInput {
     pub assignee: Option<String>,
 }
 
+/// Input fields for adding a comment to an issue or epic.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueCommentInput {
+    /// The issue or epic ID to comment on.
+    pub issue_id: String,
+    /// The comment body text.
+    pub body: String,
+}
+
 /// Parameters for filtering issue list queries.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IssueListParams {

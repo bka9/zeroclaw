@@ -1,7 +1,7 @@
 use super::traits::IssueTrackerProvider;
 use super::types::{
-    DepAddInput, EpicCreateInput, EpicUpdateInput, IssueCreateInput, IssueListParams,
-    IssueUpdateInput,
+    DepAddInput, EpicCreateInput, EpicUpdateInput, IssueCommentInput, IssueCreateInput,
+    IssueListParams, IssueUpdateInput,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -311,12 +311,22 @@ impl IssueTrackerProvider for BeadsProvider {
         self.run_bd(&args).await
     }
 
+    async fn issue_comment(&self, input: &IssueCommentInput) -> anyhow::Result<Value> {
+        self.run_bd_with_stdin(&["comment", &input.issue_id], &input.body)
+            .await
+    }
+
     // ── Dependencies ───────────────────────────────────────────
 
     async fn dep_add(&self, input: &DepAddInput) -> anyhow::Result<Value> {
         let dep_type = input.dep_type.as_deref().unwrap_or("blocks");
         self.run_bd(&[
-            "dep", "add", &input.from_id, &input.to_id, "--type", dep_type,
+            "dep",
+            "add",
+            &input.from_id,
+            &input.to_id,
+            "--type",
+            dep_type,
         ])
         .await
     }

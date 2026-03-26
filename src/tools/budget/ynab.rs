@@ -1,5 +1,7 @@
 use super::traits::BudgetProvider;
-use super::types::{CategoryInput, TransactionInput, TransactionListParams, TransactionUpdateInput};
+use super::types::{
+    CategoryInput, TransactionInput, TransactionListParams, TransactionUpdateInput,
+};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::{json, Value};

@@ -47,7 +47,6 @@ pub mod gemini_cli;
 pub mod git_operations;
 pub mod glob_search;
 pub mod google_workspace;
-pub mod issue_tracker;
 #[cfg(feature = "hardware")]
 pub mod hardware_board_info;
 #[cfg(feature = "hardware")]
@@ -58,6 +57,7 @@ pub mod health_tool;
 pub mod http_request;
 pub mod image_gen;
 pub mod image_info;
+pub mod issue_tracker;
 pub mod jira_tool;
 pub mod knowledge_tool;
 pub mod linkedin;

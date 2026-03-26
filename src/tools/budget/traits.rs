@@ -1,4 +1,6 @@
-use super::types::{CategoryInput, TransactionInput, TransactionListParams, TransactionUpdateInput};
+use super::types::{
+    CategoryInput, TransactionInput, TransactionListParams, TransactionUpdateInput,
+};
 use async_trait::async_trait;
 use serde_json::Value;
 
