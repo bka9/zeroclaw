@@ -616,7 +616,7 @@ async fn build_context(
             if context == "[Memory context]\n" {
                 context.clear();
             } else {
-                context.push('\n');
+                context.push_str("[/Memory context]\n\n");
             }
         }
     }
@@ -1237,20 +1237,29 @@ fn parse_xml_attribute_tool_calls(response: &str) -> Vec<ParsedToolCall> {
 /// }}
 /// /TOOL_CALL
 /// ```
+/// Also handles the square bracket variant emitted by models like MiniMax 2.7:
+/// ```text
+/// [TOOL_CALL]{tool => "shell", args => {--command "echo hello"}}[/TOOL_CALL]
+/// ```
 fn parse_perl_style_tool_calls(response: &str) -> Vec<ParsedToolCall> {
     let mut calls = Vec::new();
 
     // Regex to find TOOL_CALL blocks - handle double closing braces }}
-    static PERL_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?s)TOOL_CALL\s*\{(.+?)\}\}\s*/TOOL_CALL").unwrap());
+    // Matches both `TOOL_CALL { ... }} /TOOL_CALL` and `[TOOL_CALL]{ ... }}[/TOOL_CALL]`
+    static PERL_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?s)(?:\[TOOL_CALL\]|TOOL_CALL)\s*\{(.+?)\}\}\s*(?:\[/TOOL_CALL\]|/TOOL_CALL)")
+            .unwrap()
+    });
 
     // Regex to find tool => "name" in the content
     static TOOL_NAME_RE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r#"tool\s*=>\s*"([^"]+)""#).unwrap());
 
-    // Regex to find args => { ... } block
+    // Regex to find args => { ... } block.
+    // The closing brace is optional: in the square bracket variant [TOOL_CALL]{...}}[/TOOL_CALL]
+    // the outer regex may consume the inner closing brace, so the args content may run to end of string.
     static ARGS_BLOCK_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?s)args\s*=>\s*\{(.+?)\}").unwrap());
+        LazyLock::new(|| Regex::new(r"(?s)args\s*=>\s*\{(.+?)(?:\}|$)").unwrap());
 
     // Regex to find --key "value" pairs
     static ARGS_RE: LazyLock<Regex> =
@@ -2115,6 +2124,7 @@ fn detect_tool_call_parse_issue(response: &str, parsed_calls: &[ParsedToolCall])
         || trimmed.contains("```tool ") // Generic ```tool <name> pattern
         || trimmed.contains("\"tool_calls\"")
         || trimmed.contains("TOOL_CALL")
+        || trimmed.contains("[TOOL_CALL]")
         || trimmed.contains("<FunctionCall>");
 
     if looks_like_tool_payload {
@@ -2394,6 +2404,11 @@ async fn consume_provider_streaming_response(
                     }
                     outcome.forwarded_live_deltas = false;
                 }
+            }
+            StreamEvent::PreExecutedToolCall { .. } | StreamEvent::PreExecutedToolResult { .. } => {
+                // Pre-executed tool events are for observability only.
+                // They are forwarded to the gateway via turn_streamed but
+                // do not affect the agent's tool dispatch loop.
             }
             StreamEvent::TextDelta(chunk) => {
                 if chunk.delta.is_empty() {
@@ -2980,6 +2995,13 @@ pub(crate) async fn run_tool_call_loop(
         let should_consume_provider_stream = on_delta.is_some()
             && provider.supports_streaming()
             && (request_tools.is_none() || provider.supports_streaming_tool_events());
+        tracing::debug!(
+            has_on_delta = on_delta.is_some(),
+            supports_streaming = provider.supports_streaming(),
+            should_consume_provider_stream,
+            "Streaming decision for iteration {}",
+            iteration + 1,
+        );
         let mut streamed_live_deltas = false;
 
         let chat_result = if should_consume_provider_stream {
@@ -3862,6 +3884,7 @@ pub async fn run(
         _reaction_handle,
         _channel_map_handle,
         _ask_user_handle,
+        _escalate_handle,
     ) = tools::all_tools_with_runtime(
         Arc::new(config.clone()),
         &security,
@@ -4772,6 +4795,7 @@ pub async fn process_message(
         _reaction_handle_pm,
         _channel_map_handle_pm,
         _ask_user_handle_pm,
+        _escalate_handle_pm,
     ) = tools::all_tools_with_runtime(
         Arc::new(config.clone()),
         &security,
@@ -7799,6 +7823,47 @@ Tail"#;
         assert_eq!(
             calls[0].arguments.get("command").unwrap().as_str().unwrap(),
             "uname -a"
+        );
+    }
+
+    #[test]
+    fn parse_tool_calls_handles_square_bracket_tool_call_blocks() {
+        let response =
+            r#"[TOOL_CALL]{tool => "shell", args => {--command "echo hello"}}[/TOOL_CALL]"#;
+
+        let calls = parse_perl_style_tool_calls(response);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "shell");
+        assert_eq!(
+            calls[0].arguments.get("command").unwrap().as_str().unwrap(),
+            "echo hello"
+        );
+    }
+
+    #[test]
+    fn parse_tool_calls_handles_square_bracket_multiline() {
+        let response = r#"[TOOL_CALL]
+{tool => "file_read", args => {
+  --path "/tmp/test.txt"
+  --description "Read test file"
+}}
+[/TOOL_CALL]"#;
+
+        let calls = parse_perl_style_tool_calls(response);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "file_read");
+        assert_eq!(
+            calls[0].arguments.get("path").unwrap().as_str().unwrap(),
+            "/tmp/test.txt"
+        );
+        assert_eq!(
+            calls[0]
+                .arguments
+                .get("description")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "Read test file"
         );
     }
 
