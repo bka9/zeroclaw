@@ -713,6 +713,7 @@ pub fn all_tools_with_runtime(
                 root_config.agentphone.voice.clone(),
                 root_config.agentphone.begin_message.clone(),
                 security.clone(),
+                memory.clone(),
             )));
         }
     }

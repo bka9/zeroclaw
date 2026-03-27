@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::memory::{Memory, MemoryCategory};
 use crate::security::{policy::ToolOperation, SecurityPolicy};
 use async_trait::async_trait;
 use serde_json::json;
@@ -24,6 +25,7 @@ pub struct AgentPhoneTool {
     default_begin_message: Option<String>,
     http: reqwest::Client,
     security: Arc<SecurityPolicy>,
+    mem: Arc<dyn Memory>,
 }
 
 impl AgentPhoneTool {
@@ -37,6 +39,7 @@ impl AgentPhoneTool {
         default_voice: Option<String>,
         default_begin_message: Option<String>,
         security: Arc<SecurityPolicy>,
+        mem: Arc<dyn Memory>,
     ) -> Self {
         Self {
             api_key,
@@ -51,6 +54,7 @@ impl AgentPhoneTool {
                 .build()
                 .unwrap_or_default(),
             security,
+            mem,
         }
     }
 
@@ -308,7 +312,23 @@ impl AgentPhoneTool {
         }
 
         match self.api_post("/calls", &body).await {
-            Ok(data) => ToolResult::success(serde_json::to_string_pretty(&data).unwrap_or_default()),
+            Ok(data) => {
+                // Store outbound call context in memory for counterparty session
+                let session_id = format!("agentphone_voice_{to_number}");
+                let greeting = body.get("initialGreeting").and_then(|v| v.as_str()).unwrap_or("default");
+                let prompt = body.get("systemPrompt").and_then(|v| v.as_str()).unwrap_or("none");
+                let context = format!(
+                    "[outbound call placed] to: {to_number}, greeting: {greeting}, prompt: {prompt}"
+                );
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let key = format!("agentphone_out_{to_number}_{now}");
+                let _ = self.mem.store(&key, &context, MemoryCategory::Conversation, Some(&session_id)).await;
+
+                ToolResult::success(serde_json::to_string_pretty(&data).unwrap_or_default())
+            }
             Err(e) => ToolResult::error(format!("{e:#}")),
         }
     }
@@ -367,9 +387,21 @@ impl AgentPhoneTool {
             // Update conversation metadata to trigger reply
             let body = json!({"metadata": {"_reply": message}});
             match self.api_patch(&format!("/conversations/{conv_id}"), &body).await {
-                Ok(data) => ToolResult::success(
-                    serde_json::to_string_pretty(&data).unwrap_or_default(),
-                ),
+                Ok(data) => {
+                    // Store outbound SMS context in memory for counterparty session
+                    let session_id = format!("agentphone_sms_{to_number}");
+                    let context = format!("[outbound SMS sent] to: {to_number}, message: {message}");
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let key = format!("agentphone_out_{to_number}_{now}");
+                    let _ = self.mem.store(&key, &context, MemoryCategory::Conversation, Some(&session_id)).await;
+
+                    ToolResult::success(
+                        serde_json::to_string_pretty(&data).unwrap_or_default(),
+                    )
+                }
                 Err(e) => ToolResult::error(format!("{e:#}")),
             }
         } else {
@@ -639,6 +671,7 @@ impl Tool for AgentPhoneTool {
 mod tests {
     use super::*;
     use crate::config::AutonomyConfig;
+    use crate::memory::none::NoneMemory;
     use crate::security::SecurityPolicy;
     use std::path::PathBuf;
 
@@ -648,6 +681,7 @@ mod tests {
             &AutonomyConfig::default(),
             &workspace,
         ));
+        let mem: Arc<dyn Memory> = Arc::new(NoneMemory::new());
         AgentPhoneTool::new(
             "test-api-key".into(),
             Some("agt_test".into()),
@@ -661,6 +695,7 @@ mod tests {
             Some("Polly.Amy".into()),
             Some("Hello!".into()),
             security,
+            mem,
         )
     }
 
@@ -691,6 +726,7 @@ mod tests {
             &AutonomyConfig::default(),
             &workspace,
         ));
+        let mem: Arc<dyn Memory> = Arc::new(NoneMemory::new());
         let tool = AgentPhoneTool::new(
             "key".into(),
             None,
@@ -700,6 +736,7 @@ mod tests {
             None,
             None,
             security,
+            mem,
         );
         assert!(tool.is_number_allowed("+15559999999"));
     }
@@ -711,6 +748,7 @@ mod tests {
             &AutonomyConfig::default(),
             &workspace,
         ));
+        let mem: Arc<dyn Memory> = Arc::new(NoneMemory::new());
         let tool = AgentPhoneTool::new(
             "key".into(),
             None,
@@ -720,6 +758,7 @@ mod tests {
             None,
             None,
             security,
+            mem,
         );
         assert!(!tool.is_number_allowed("+15551234567"));
     }

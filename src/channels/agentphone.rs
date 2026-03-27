@@ -181,10 +181,64 @@ impl AgentPhoneChannel {
         mac.verify_slice(&expected).is_ok()
     }
 
+    /// Format `recentHistory` from the webhook payload as a chronological conversation log.
+    fn format_recent_history(
+        payload: &serde_json::Value,
+        channel_type: &str,
+        from: &str,
+    ) -> Option<String> {
+        let history = payload.get("recentHistory")?.as_array()?;
+        if history.is_empty() {
+            return None;
+        }
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "[Conversation history with {from} via {channel_type}]"
+        ));
+        for entry in history {
+            let direction = entry
+                .get("direction")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let body = entry.get("body").and_then(|v| v.as_str()).unwrap_or("");
+            if body.is_empty() {
+                continue;
+            }
+            let time = entry
+                .get("receivedAt")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let speaker = if direction == "inbound" {
+                from
+            } else {
+                "Agent"
+            };
+            // Trim to "2025-01-15T12:00" for readability
+            let short_time = &time[..16.min(time.len())];
+            lines.push(format!("[{short_time}] {speaker}: {body}"));
+        }
+        lines.push("[Current message]".to_string());
+        Some(lines.join("\n"))
+    }
+
+    /// Extract `conversationState` metadata as a context prefix.
+    fn format_conversation_state(payload: &serde_json::Value) -> Option<String> {
+        let state = payload.get("conversationState")?;
+        if state.is_null() {
+            return None;
+        }
+        Some(format!("[conversation state: {state}] "))
+    }
+
     /// Parse an incoming webhook payload from AgentPhone.
     ///
     /// Handles both `channel: "sms"` and `channel: "voice"` events.
     /// Returns an empty vec for unknown events or unauthorized callers.
+    ///
+    /// The message content is enriched with:
+    /// - `recentHistory`: chronological conversation log prepended to the message
+    /// - `conversationState`: custom metadata prefix
+    /// - Channel is tagged as `agentphone_sms` or `agentphone_voice` for session scoping
     pub fn parse_webhook_payload(&self, payload: &serde_json::Value) -> Vec<ChannelMessage> {
         let mut messages = Vec::new();
 
@@ -224,7 +278,7 @@ impl AgentPhoneChannel {
             return messages;
         }
 
-        let content = match channel {
+        let raw_content = match channel {
             "sms" => data
                 .get("message")
                 .and_then(|v| v.as_str())
@@ -254,9 +308,27 @@ impl AgentPhoneChannel {
             }
         };
 
-        if content.is_empty() {
+        if raw_content.is_empty() {
             return messages;
         }
+
+        // Build enriched content with conversation history and state
+        let mut content_parts = Vec::new();
+
+        // 1. Recent conversation history (chronological log from AgentPhone)
+        if let Some(history) = Self::format_recent_history(payload, channel, &normalized_from) {
+            content_parts.push(history);
+        }
+
+        // 2. Conversation state metadata
+        if let Some(state) = Self::format_conversation_state(payload) {
+            content_parts.push(state);
+        }
+
+        // 3. The actual message
+        content_parts.push(raw_content);
+
+        let content = content_parts.join("\n");
 
         let timestamp = payload
             .get("timestamp")
@@ -280,12 +352,15 @@ impl AgentPhoneChannel {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        // Tag channel as agentphone_sms or agentphone_voice for session scoping
+        let typed_channel = format!("agentphone_{channel}");
+
         messages.push(ChannelMessage {
             id: Uuid::new_v4().to_string(),
             reply_target: normalized_from.clone(),
             sender: normalized_from,
             content,
-            channel: "agentphone".to_string(),
+            channel: typed_channel,
             timestamp,
             thread_ts,
             interruption_scope_id: None,
@@ -482,8 +557,8 @@ mod tests {
         let messages = ch.parse_webhook_payload(&payload);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].sender, "+15551234567");
-        assert_eq!(messages[0].content, "Hello, I need help");
-        assert_eq!(messages[0].channel, "agentphone");
+        assert!(messages[0].content.contains("Hello, I need help"));
+        assert_eq!(messages[0].channel, "agentphone_sms");
         assert_eq!(
             messages[0].thread_ts.as_deref(),
             Some("conv_def456")
@@ -514,6 +589,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert!(messages[0].content.contains("I need help with my order"));
         assert!(messages[0].content.contains("0.95"));
+        assert_eq!(messages[0].channel, "agentphone_voice");
         assert_eq!(messages[0].thread_ts.as_deref(), Some("call_abc123"));
     }
 
@@ -595,5 +671,85 @@ mod tests {
             Some("sha256=deadbeef"),
             Some("1705312800"),
         ));
+    }
+
+    #[test]
+    fn parse_sms_with_recent_history() {
+        let ch = make_channel();
+        let payload = serde_json::json!({
+            "event": "agent.message",
+            "channel": "sms",
+            "timestamp": "2025-01-15T12:05:00Z",
+            "data": {
+                "conversationId": "conv_1",
+                "from": "+15551234567",
+                "message": "Can I move it to Thursday?",
+                "direction": "inbound"
+            },
+            "recentHistory": [
+                {
+                    "body": "Hi, this is a reminder about your appointment tomorrow at 2pm.",
+                    "direction": "outbound",
+                    "receivedAt": "2025-01-15T11:58:00Z"
+                },
+                {
+                    "body": "Thanks, can I reschedule?",
+                    "direction": "inbound",
+                    "receivedAt": "2025-01-15T12:00:00Z"
+                }
+            ]
+        });
+
+        let messages = ch.parse_webhook_payload(&payload);
+        assert_eq!(messages.len(), 1);
+        let content = &messages[0].content;
+        assert!(content.contains("[Conversation history with +15551234567 via sms]"));
+        assert!(content.contains("Agent: Hi, this is a reminder"));
+        assert!(content.contains("+15551234567: Thanks, can I reschedule?"));
+        assert!(content.contains("[Current message]"));
+        assert!(content.contains("Can I move it to Thursday?"));
+    }
+
+    #[test]
+    fn parse_sms_with_conversation_state() {
+        let ch = make_channel();
+        let payload = serde_json::json!({
+            "event": "agent.message",
+            "channel": "sms",
+            "timestamp": "2025-01-15T12:00:00Z",
+            "data": {
+                "from": "+15551234567",
+                "message": "Yes please"
+            },
+            "conversationState": {
+                "customerName": "Jane Doe",
+                "orderId": "ORD-12345"
+            }
+        });
+
+        let messages = ch.parse_webhook_payload(&payload);
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].content.contains("[conversation state:"));
+        assert!(messages[0].content.contains("Jane Doe"));
+        assert!(messages[0].content.contains("Yes please"));
+    }
+
+    #[test]
+    fn parse_no_recent_history_still_works() {
+        let ch = make_channel();
+        let payload = serde_json::json!({
+            "event": "agent.message",
+            "channel": "sms",
+            "timestamp": "2025-01-15T12:00:00Z",
+            "data": {
+                "from": "+15551234567",
+                "message": "Hello"
+            }
+        });
+
+        let messages = ch.parse_webhook_payload(&payload);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "Hello");
+        assert_eq!(messages[0].channel, "agentphone_sms");
     }
 }

@@ -99,7 +99,8 @@ fn nextcloud_talk_memory_key(msg: &crate::channels::traits::ChannelMessage) -> S
 }
 
 fn agentphone_memory_key(msg: &crate::channels::traits::ChannelMessage) -> String {
-    format!("agentphone_{}_{}", msg.sender, msg.id)
+    // channel is "agentphone_sms" or "agentphone_voice" — use it for scoped keys
+    format!("{}_{}_{}", msg.channel, msg.sender, msg.id)
 }
 
 fn sender_session_id(channel: &str, msg: &crate::channels::traits::ChannelMessage) -> String {
@@ -1849,6 +1850,20 @@ async fn handle_agentphone_webhook(
         .await
         {
             Ok(response) => {
+                // Store agent response in memory for conversation continuity
+                if state.auto_save {
+                    let resp_key = format!("agentphone_resp_{}_{}", msg.sender, msg.id);
+                    let _ = state
+                        .mem
+                        .store(
+                            &resp_key,
+                            &response,
+                            MemoryCategory::Conversation,
+                            Some(&session_id),
+                        )
+                        .await;
+                }
+
                 if is_voice {
                     // For voice: return response text directly so AgentPhone TTS speaks it
                     return (
