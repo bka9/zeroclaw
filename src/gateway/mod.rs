@@ -705,6 +705,8 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
                 .with_agent_id(ap_cfg.agent_id.clone())
                 .with_voice(ap_cfg.voice.clone())
                 .with_begin_message(ap_cfg.begin_message.clone())
+                .with_conversation_prompt(ap_cfg.conversation_prompt.clone())
+                .with_model(ap_cfg.model.clone())
                 .with_proxy_url(ap_cfg.proxy_url.clone()),
             )
         });
@@ -1363,7 +1365,20 @@ async fn run_gateway_chat_with_tools(
     message: &str,
     session_id: Option<&str>,
 ) -> anyhow::Result<String> {
-    let config = state.config.lock().clone();
+    run_gateway_chat_with_tools_model(state, message, session_id, None).await
+}
+
+/// Like [`run_gateway_chat_with_tools`] but allows overriding the model.
+async fn run_gateway_chat_with_tools_model(
+    state: &AppState,
+    message: &str,
+    session_id: Option<&str>,
+    model_override: Option<&str>,
+) -> anyhow::Result<String> {
+    let mut config = state.config.lock().clone();
+    if let Some(model) = model_override {
+        config.default_model = Some(model.to_string());
+    }
     Box::pin(crate::agent::process_message(config, message, session_id)).await
 }
 
@@ -1736,6 +1751,124 @@ async fn handle_whatsapp_message(
     (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
 }
 
+// ── AgentPhone intent classification ────────────────────────────────────
+
+/// Classified intent for an incoming AgentPhone message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentPhoneIntent {
+    Greeting,
+    Request,
+    Response,
+    Farewell,
+}
+
+/// Use a lightweight LLM call to classify an incoming message into one of
+/// the four intent categories.  Falls back to `Request` when the LLM
+/// response cannot be parsed.
+async fn classify_agentphone_intent(state: &AppState, raw_input: &str, model: &str) -> AgentPhoneIntent {
+    use crate::providers::traits::{ChatMessage, ChatRequest};
+
+    let system = ChatMessage::system(
+        "Classify the following message into exactly one category. \
+         Respond with ONLY the category name, nothing else.\n\
+         Categories:\n\
+         - Greeting: A hello, hi, hey, good morning, or similar opening\n\
+         - Request: A question, command, or new ask\n\
+         - Response: An answer or follow-up to a prior exchange\n\
+         - Farewell: A goodbye, bye, thanks bye, talk later, or similar closing",
+    );
+    let user = ChatMessage::user(raw_input);
+    let messages = [system, user];
+
+    let request = ChatRequest {
+        messages: &messages,
+        tools: None,
+    };
+
+    match state.provider.chat(request, model, 0.0).await {
+        Ok(resp) => {
+            let text = resp.text.unwrap_or_default().trim().to_lowercase();
+            if text.contains("greeting") {
+                AgentPhoneIntent::Greeting
+            } else if text.contains("farewell") {
+                AgentPhoneIntent::Farewell
+            } else if text.contains("response") {
+                AgentPhoneIntent::Response
+            } else {
+                AgentPhoneIntent::Request
+            }
+        }
+        Err(e) => {
+            tracing::warn!("AgentPhone intent classification failed: {e:#}; defaulting to Request");
+            AgentPhoneIntent::Request
+        }
+    }
+}
+
+/// Generate a contextual greeting or farewell using a lightweight LLM call.
+///
+/// The enriched content (conversation history + state) and recalled memory
+/// are included so the response can be personalised to the caller.
+async fn generate_agentphone_simple_response(
+    state: &AppState,
+    enriched_content: &str,
+    session_id: Option<&str>,
+    mode: &str,
+    model: &str,
+) -> anyhow::Result<String> {
+    use crate::providers::traits::{ChatMessage, ChatRequest};
+
+    let system_prompt = match mode {
+        "greeting" => {
+            "You are a helpful assistant answering a phone call or text message. \
+             The caller just greeted you. Respond with a warm, contextual greeting \
+             and ask how you may help them. Use the conversation history and context \
+             provided to personalise your response. Keep it brief and natural."
+        }
+        "farewell" => {
+            "You are a helpful assistant on a phone call or text message. \
+             The caller is saying goodbye. Respond with a brief, warm farewell \
+             that acknowledges the conversation. Use the conversation history and \
+             context provided to personalise your response."
+        }
+        _ => "You are a helpful assistant. Respond briefly and naturally.",
+    };
+
+    // Recall memory for this session to add prior-interaction context.
+    let mut user_content = String::new();
+    if let Ok(entries) = state
+        .mem
+        .recall(enriched_content, 5, session_id, None, None)
+        .await
+    {
+        let relevant: Vec<_> = entries
+            .iter()
+            .filter(|e| e.score.map_or(false, |s| s >= 0.3))
+            .collect();
+        if !relevant.is_empty() {
+            user_content.push_str("[Recalled memory]\n");
+            for entry in &relevant {
+                user_content.push_str(&entry.content);
+                user_content.push('\n');
+            }
+            user_content.push('\n');
+        }
+    }
+    user_content.push_str(enriched_content);
+
+    let system = ChatMessage::system(system_prompt);
+    let user = ChatMessage::user(&user_content);
+    let messages = [system, user];
+
+    let request = ChatRequest {
+        messages: &messages,
+        tools: None,
+    };
+
+    let resp = state.provider.chat(request, model, 0.7).await?;
+    Ok(resp.text.unwrap_or_else(|| "Hello! How may I help you?".into()))
+}
+
 /// POST /agentphone — incoming SMS and voice transcript webhook from AgentPhone
 async fn handle_agentphone_webhook(
     State(state): State<AppState>,
@@ -1808,7 +1941,24 @@ async fn handle_agentphone_webhook(
         }
     }
 
-    // Parse messages from the webhook payload
+    // Extract raw user input (without conversation history enrichment) for classification.
+    let raw_input = match channel_type {
+        "sms" => payload
+            .get("data")
+            .and_then(|d| d.get("message"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "voice" => payload
+            .get("data")
+            .and_then(|d| d.get("transcript"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        _ => String::new(),
+    };
+
+    // Parse messages from the webhook payload (enriched with history + state)
     let messages = ap.parse_webhook_payload(&payload);
 
     if messages.is_empty() {
@@ -1819,6 +1969,12 @@ async fn handle_agentphone_webhook(
     // For SMS, we process asynchronously and send via the channel.
     let is_voice = channel_type == "voice";
 
+    // Resolve channel-specific model override, falling back to global default.
+    let effective_model = ap
+        .model()
+        .map(String::from)
+        .unwrap_or_else(|| state.model.clone());
+
     for msg in &messages {
         tracing::info!(
             "AgentPhone {} from {}: {}",
@@ -1828,7 +1984,7 @@ async fn handle_agentphone_webhook(
         );
         let session_id = sender_session_id("agentphone", msg);
 
-        // Auto-save to memory
+        // Auto-save inbound message to memory
         if state.auto_save && !memory::should_skip_autosave_content(&msg.content) {
             let key = agentphone_memory_key(msg);
             let _ = state
@@ -1842,13 +1998,45 @@ async fn handle_agentphone_webhook(
                 .await;
         }
 
-        match Box::pin(run_gateway_chat_with_tools(
-            &state,
-            &msg.content,
-            Some(&session_id),
-        ))
-        .await
-        {
+        // ── Classify intent and route accordingly ──────────────────────
+        let intent = classify_agentphone_intent(&state, &raw_input, &effective_model).await;
+        tracing::info!("AgentPhone intent for {}: {intent:?}", msg.sender);
+
+        let result: Result<String, anyhow::Error> = match intent {
+            AgentPhoneIntent::Greeting | AgentPhoneIntent::Farewell => {
+                let mode = if intent == AgentPhoneIntent::Greeting {
+                    "greeting"
+                } else {
+                    "farewell"
+                };
+                generate_agentphone_simple_response(
+                    &state,
+                    &msg.content,
+                    Some(&session_id),
+                    mode,
+                    &effective_model,
+                )
+                .await
+            }
+            AgentPhoneIntent::Request | AgentPhoneIntent::Response => {
+                // Prepend conversation prompt preamble for speech context
+                let conv_prompt = ap.conversation_prompt();
+                let primed_content = if conv_prompt.is_empty() {
+                    msg.content.clone()
+                } else {
+                    format!("[System context]\n{conv_prompt}\n\n{}", msg.content)
+                };
+                Box::pin(run_gateway_chat_with_tools_model(
+                    &state,
+                    &primed_content,
+                    Some(&session_id),
+                    ap.model(),
+                ))
+                .await
+            }
+        };
+
+        match result {
             Ok(response) => {
                 // Store agent response in memory for conversation continuity
                 if state.auto_save {
@@ -1865,7 +2053,13 @@ async fn handle_agentphone_webhook(
                 }
 
                 if is_voice {
-                    // For voice: return response text directly so AgentPhone TTS speaks it
+                    // For farewell on voice: speak farewell then hang up
+                    if intent == AgentPhoneIntent::Farewell {
+                        return (
+                            StatusCode::OK,
+                            Json(serde_json::json!({"text": response, "hangup": true})),
+                        );
+                    }
                     return (
                         StatusCode::OK,
                         Json(serde_json::json!({"text": response})),

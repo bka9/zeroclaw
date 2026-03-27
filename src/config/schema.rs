@@ -8115,6 +8115,39 @@ pub struct AgentPhoneChannelConfig {
     /// Per-channel proxy URL (http, https, socks5, socks5h).
     #[serde(default)]
     pub proxy_url: Option<String>,
+    /// LLM model override for this channel. When set, all AgentPhone
+    /// interactions (classification, greeting/farewell, and full agent
+    /// pipeline) use this model instead of the global `default_model`.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// System prompt preamble for conversational interactions (Request/Response).
+    /// Prepended to the caller's message to prime the agent for voice/SMS
+    /// context.  Uses a speech-optimised default when not set.
+    #[serde(default = "default_ap_conversation_prompt")]
+    pub conversation_prompt: String,
+}
+
+fn default_ap_conversation_prompt() -> String {
+    "You are a live voice and messaging assistant engaged in a real-time \
+     phone call or text conversation. Respond as if you are speaking \
+     directly to the person — use natural, spoken language.\n\n\
+     Guidelines:\n\
+     - Keep responses concise and conversational. Aim for 1–3 sentences \
+       unless the caller asks for detail.\n\
+     - Never use markdown, bullet points, numbered lists, code blocks, or \
+       any visual formatting. Your output will be read aloud by a \
+       text-to-speech engine or displayed as a plain text message.\n\
+     - Use contractions, filler phrases, and natural speech patterns \
+       (\"Sure thing\", \"Let me check\", \"Got it\") to sound human.\n\
+     - When relaying structured data (lists, steps), narrate them \
+       conversationally (\"First you'll want to…, then…\").\n\
+     - If the conversation history is provided, use it to maintain \
+       continuity — reference what was already discussed rather than \
+       repeating yourself.\n\
+     - If you don't know the answer, say so plainly and offer to help \
+       find out.\n\
+     - Match the caller's energy and formality level."
+        .into()
 }
 
 /// Usage monitoring configuration for the X API (`[x.usage]`).
@@ -9325,6 +9358,9 @@ impl Config {
             )?;
             if let Some(ref mut pinggy) = config.tunnel.pinggy {
                 decrypt_optional_secret(&store, &mut pinggy.token, "config.tunnel.pinggy.token")?;
+            }
+            if let Some(ref mut ngrok) = config.tunnel.ngrok {
+                decrypt_secret(&store, &mut ngrok.auth_token, "config.tunnel.ngrok.auth_token")?;
             }
             decrypt_optional_secret(
                 &store,
@@ -10986,6 +11022,9 @@ impl Config {
         )?;
         if let Some(ref mut pinggy) = config_to_save.tunnel.pinggy {
             encrypt_optional_secret(&store, &mut pinggy.token, "config.tunnel.pinggy.token")?;
+        }
+        if let Some(ref mut ngrok) = config_to_save.tunnel.ngrok {
+            encrypt_secret(&store, &mut ngrok.auth_token, "config.tunnel.ngrok.auth_token")?;
         }
         encrypt_optional_secret(
             &store,

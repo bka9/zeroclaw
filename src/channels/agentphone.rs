@@ -18,6 +18,8 @@ pub struct AgentPhoneChannel {
     allowed_numbers: Vec<String>,
     voice: Option<String>,
     begin_message: Option<String>,
+    conversation_prompt: String,
+    model: Option<String>,
     proxy_url: Option<String>,
     http: reqwest::Client,
 }
@@ -35,6 +37,8 @@ impl AgentPhoneChannel {
             agent_id: None,
             voice: None,
             begin_message: None,
+            conversation_prompt: String::new(),
+            model: None,
             proxy_url: None,
             http: reqwest::Client::new(),
         }
@@ -53,6 +57,26 @@ impl AgentPhoneChannel {
     pub fn with_begin_message(mut self, begin_message: Option<String>) -> Self {
         self.begin_message = begin_message;
         self
+    }
+
+    pub fn with_conversation_prompt(mut self, prompt: String) -> Self {
+        self.conversation_prompt = prompt;
+        self
+    }
+
+    /// Get the conversation prompt preamble for Request/Response interactions.
+    pub fn conversation_prompt(&self) -> &str {
+        &self.conversation_prompt
+    }
+
+    pub fn with_model(mut self, model: Option<String>) -> Self {
+        self.model = model;
+        self
+    }
+
+    /// Get the channel-specific model override, if configured.
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
     }
 
     pub fn with_proxy_url(mut self, proxy_url: Option<String>) -> Self {
