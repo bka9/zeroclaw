@@ -378,6 +378,7 @@ pub fn all_tools(
         fallback_api_key,
         root_config,
         canvas_store,
+        None,
     )
 }
 
@@ -402,6 +403,7 @@ pub fn all_tools_with_runtime(
     fallback_api_key: Option<&str>,
     root_config: &crate::config::Config,
     canvas_store: Option<CanvasStore>,
+    agentphone_outbound_tracker: Option<crate::channels::agentphone::OutboundSessionTracker>,
 ) -> (
     Vec<Box<dyn Tool>>,
     Option<DelegateParentToolsHandle>,
@@ -704,7 +706,7 @@ pub fn all_tools_with_runtime(
                 (set agentphone.api_key or AGENTPHONE_API_KEY env var)"
             );
         } else {
-            tool_arcs.push(Arc::new(AgentPhoneTool::new(
+            let mut ap_tool = AgentPhoneTool::new(
                 api_key,
                 root_config.agentphone.default_agent_id.clone(),
                 root_config.agentphone.default_from_number_id.clone(),
@@ -714,7 +716,11 @@ pub fn all_tools_with_runtime(
                 root_config.agentphone.begin_message.clone(),
                 security.clone(),
                 memory.clone(),
-            )));
+            );
+            if let Some(ref tracker) = agentphone_outbound_tracker {
+                ap_tool = ap_tool.with_outbound_tracker(Arc::clone(tracker));
+            }
+            tool_arcs.push(Arc::new(ap_tool));
         }
     }
 

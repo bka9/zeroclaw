@@ -1,4 +1,6 @@
 use super::traits::{Tool, ToolResult};
+use crate::channels::agentphone::OutboundSessionTracker;
+use crate::config::PhoneNumberEntry;
 use crate::memory::{Memory, MemoryCategory};
 use crate::security::{policy::ToolOperation, SecurityPolicy};
 use async_trait::async_trait;
@@ -19,13 +21,14 @@ pub struct AgentPhoneTool {
     api_key: String,
     default_agent_id: Option<String>,
     default_from_number_id: Option<String>,
-    allowed_numbers: Vec<String>,
+    allowed_numbers: Vec<PhoneNumberEntry>,
     allowed_actions: Vec<String>,
     default_voice: Option<String>,
     default_begin_message: Option<String>,
     http: reqwest::Client,
     security: Arc<SecurityPolicy>,
     mem: Arc<dyn Memory>,
+    outbound_tracker: Option<OutboundSessionTracker>,
 }
 
 impl AgentPhoneTool {
@@ -34,7 +37,7 @@ impl AgentPhoneTool {
         api_key: String,
         default_agent_id: Option<String>,
         default_from_number_id: Option<String>,
-        allowed_numbers: Vec<String>,
+        allowed_numbers: Vec<PhoneNumberEntry>,
         allowed_actions: Vec<String>,
         default_voice: Option<String>,
         default_begin_message: Option<String>,
@@ -55,7 +58,14 @@ impl AgentPhoneTool {
                 .unwrap_or_default(),
             security,
             mem,
+            outbound_tracker: None,
         }
+    }
+
+    /// Set the shared outbound session tracker.
+    pub fn with_outbound_tracker(mut self, tracker: OutboundSessionTracker) -> Self {
+        self.outbound_tracker = Some(tracker);
+        self
     }
 
     fn is_action_allowed(&self, action: &str) -> bool {
@@ -63,7 +73,38 @@ impl AgentPhoneTool {
     }
 
     fn is_number_allowed(&self, phone: &str) -> bool {
-        self.allowed_numbers.iter().any(|n| n == "*" || n == phone)
+        self.allowed_numbers
+            .iter()
+            .any(|entry| entry.number() == "*" || entry.number() == phone)
+    }
+
+    /// Get the configured purpose for a number, if any.
+    fn get_number_purpose(&self, phone: &str) -> Option<&str> {
+        self.allowed_numbers.iter().find_map(|entry| {
+            if entry.number() == "*" || entry.number() == phone {
+                entry.purpose()
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Register an outbound session on the shared tracker (if available).
+    fn register_outbound_session(&self, phone: &str, call_id: &str, purpose: Option<&str>, is_voice: bool) {
+        if let Some(ref tracker) = self.outbound_tracker {
+            let ttl = if is_voice { 3600u64 } else { 1800u64 };
+            let session = crate::channels::agentphone::OutboundSession {
+                call_id: call_id.to_string(),
+                started_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                purpose: purpose.map(|s| s.to_string()),
+                ttl_secs: ttl,
+            };
+            let mut sessions = tracker.lock().unwrap();
+            sessions.insert(phone.to_string(), session);
+        }
     }
 
     async fn api_get(&self, path: &str) -> anyhow::Result<serde_json::Value> {
@@ -311,14 +352,25 @@ impl AgentPhoneTool {
             body["systemPrompt"] = json!(prompt);
         }
 
+        // Resolve purpose: explicit arg > config default > none
+        let purpose = args
+            .get("purpose")
+            .and_then(|v| v.as_str())
+            .or_else(|| self.get_number_purpose(to_number));
+
         match self.api_post("/calls", &body).await {
             Ok(data) => {
+                // Register outbound session so inbound webhooks from this number are accepted
+                let call_id = data.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+                self.register_outbound_session(to_number, call_id, purpose, true);
+
                 // Store outbound call context in memory for counterparty session
                 let session_id = format!("agentphone_voice_{to_number}");
                 let greeting = body.get("initialGreeting").and_then(|v| v.as_str()).unwrap_or("default");
-                let prompt = body.get("systemPrompt").and_then(|v| v.as_str()).unwrap_or("none");
+                let prompt_val = body.get("systemPrompt").and_then(|v| v.as_str()).unwrap_or("none");
+                let purpose_str = purpose.unwrap_or("none");
                 let context = format!(
-                    "[outbound call placed] to: {to_number}, greeting: {greeting}, prompt: {prompt}"
+                    "[outbound call placed] to: {to_number}, greeting: {greeting}, prompt: {prompt_val}, purpose: {purpose_str}"
                 );
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -383,14 +435,24 @@ impl AgentPhoneTool {
             })
         });
 
+        // Resolve purpose: explicit arg > config default > none
+        let purpose = args
+            .get("purpose")
+            .and_then(|v| v.as_str())
+            .or_else(|| self.get_number_purpose(to_number));
+
         if let Some(conv_id) = conversation_id {
             // Update conversation metadata to trigger reply
             let body = json!({"metadata": {"_reply": message}});
             match self.api_patch(&format!("/conversations/{conv_id}"), &body).await {
                 Ok(data) => {
+                    // Register outbound session so inbound replies are accepted
+                    self.register_outbound_session(to_number, &conv_id, purpose, false);
+
                     // Store outbound SMS context in memory for counterparty session
                     let session_id = format!("agentphone_sms_{to_number}");
-                    let context = format!("[outbound SMS sent] to: {to_number}, message: {message}");
+                    let purpose_str = purpose.unwrap_or("none");
+                    let context = format!("[outbound SMS sent] to: {to_number}, message: {message}, purpose: {purpose_str}");
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -567,6 +629,11 @@ impl Tool for AgentPhoneTool {
                     "type": "string",
                     "description": "Begin message for inbound calls (agents.create/update)"
                 },
+                "purpose": {
+                    "type": "string",
+                    "description": "Purpose of this outbound contact, e.g. 'schedule dentist appointment'. \
+                    Used to scope information disclosure during the conversation. (for calls.create, sms.send)"
+                },
                 "metadata": {
                     "type": "object",
                     "description": "Metadata object (for conversations.update)"
@@ -670,7 +737,7 @@ impl Tool for AgentPhoneTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AutonomyConfig;
+    use crate::config::{AutonomyConfig, PhoneNumberConfig, PhoneTrustLevel};
     use crate::memory::none::NoneMemory;
     use crate::security::SecurityPolicy;
     use std::path::PathBuf;
@@ -686,7 +753,7 @@ mod tests {
             "test-api-key".into(),
             Some("agt_test".into()),
             Some("num_test".into()),
-            vec!["+15551234567".into()],
+            vec![PhoneNumberEntry::Simple("+15551234567".into())],
             vec![
                 "agents.list".into(),
                 "calls.create".into(),
@@ -731,7 +798,7 @@ mod tests {
             "key".into(),
             None,
             None,
-            vec!["*".into()],
+            vec![PhoneNumberEntry::Simple("*".into())],
             vec![],
             None,
             None,
@@ -761,6 +828,36 @@ mod tests {
             mem,
         );
         assert!(!tool.is_number_allowed("+15551234567"));
+    }
+
+    #[test]
+    fn number_purpose_lookup() {
+        let workspace = PathBuf::from("/tmp/test");
+        let security = Arc::new(SecurityPolicy::from_config(
+            &AutonomyConfig::default(),
+            &workspace,
+        ));
+        let mem: Arc<dyn Memory> = Arc::new(NoneMemory::new());
+        let tool = AgentPhoneTool::new(
+            "key".into(),
+            None,
+            None,
+            vec![
+                PhoneNumberEntry::Simple("+15551234567".into()),
+                PhoneNumberEntry::Detailed(PhoneNumberConfig {
+                    number: "+15559876543".into(),
+                    trust: PhoneTrustLevel::Scoped,
+                    purpose: Some("dentist appointment".into()),
+                }),
+            ],
+            vec![],
+            None,
+            None,
+            security,
+            mem,
+        );
+        assert_eq!(tool.get_number_purpose("+15551234567"), None);
+        assert_eq!(tool.get_number_purpose("+15559876543"), Some("dentist appointment"));
     }
 
     #[tokio::test]

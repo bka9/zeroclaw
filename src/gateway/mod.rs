@@ -461,6 +461,15 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
 
     let canvas_store = tools::CanvasStore::new();
 
+    // Create shared outbound session tracker for AgentPhone (used by both channel and tool)
+    let agentphone_outbound_tracker = if config.channels_config.agentphone.is_some()
+        || config.agentphone.enabled
+    {
+        Some(crate::channels::agentphone::new_outbound_tracker())
+    } else {
+        None
+    };
+
     let (
         mut tools_registry_raw,
         delegate_handle_gw,
@@ -483,6 +492,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         config.api_key.as_deref(),
         &config,
         Some(canvas_store.clone()),
+        agentphone_outbound_tracker.clone(),
     );
 
     // ── Wire MCP tools into the gateway tool registry (non-fatal) ───
@@ -696,8 +706,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
                 .clone()
                 .or_else(|| std::env::var("AGENTPHONE_WEBHOOK_SECRET").ok())
                 .unwrap_or_default();
-            Arc::new(
-                AgentPhoneChannel::new(
+            let mut ch = AgentPhoneChannel::new(
                     api_key,
                     webhook_secret,
                     ap_cfg.allowed_numbers.clone(),
@@ -707,8 +716,11 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
                 .with_begin_message(ap_cfg.begin_message.clone())
                 .with_conversation_prompt(ap_cfg.conversation_prompt.clone())
                 .with_model(ap_cfg.model.clone())
-                .with_proxy_url(ap_cfg.proxy_url.clone()),
-            )
+                .with_proxy_url(ap_cfg.proxy_url.clone());
+            if let Some(ref tracker) = agentphone_outbound_tracker {
+                ch = ch.with_outbound_tracker(Arc::clone(tracker));
+            }
+            Arc::new(ch)
         });
 
     // ── Session persistence for WS chat ─────────────────────
@@ -1929,7 +1941,7 @@ async fn handle_agentphone_webhook(
             } else {
                 format!("+{from}")
             };
-            if !ap.is_number_allowed(&normalized) {
+            if !ap.should_accept_inbound(&normalized) {
                 tracing::warn!(
                     "AgentPhone: hanging up voice call from unauthorized number: {normalized}"
                 );
@@ -2021,10 +2033,45 @@ async fn handle_agentphone_webhook(
             AgentPhoneIntent::Request | AgentPhoneIntent::Response => {
                 // Prepend conversation prompt preamble for speech context
                 let conv_prompt = ap.conversation_prompt();
-                let primed_content = if conv_prompt.is_empty() {
+
+                // Determine if this is a scoped (non-trusted) conversation and build
+                // an information scoping prompt if so.
+                let scope_prompt = if ap.is_trusted_number(&msg.sender) {
+                    None
+                } else {
+                    // Purpose priority: active outbound session > config > fallback
+                    let purpose = ap
+                        .get_outbound_purpose(&msg.sender)
+                        .or_else(|| ap.get_number_purpose(&msg.sender).map(|s| s.to_string()))
+                        .unwrap_or_else(|| "general outbound conversation".to_string());
+                    Some(format!(
+                        "\n\n## INFORMATION SCOPE CONSTRAINT\n\
+                        You are in a conversation with an external party (not a trusted user).\n\
+                        Purpose of this conversation: {purpose}\n\n\
+                        RULES:\n\
+                        - Only share information directly relevant to: {purpose}\n\
+                        - Do NOT disclose: specific calendar event titles or details (only share \
+                        free/busy time slots), email contents, financial data, internal notes, \
+                        or personal information about third parties.\n\
+                        - If the counterparty asks about topics outside the scope, politely \
+                        decline and redirect to the conversation purpose.\n\
+                        - You MAY share: availability (time slots), the user's name, and \
+                        information clearly needed for the stated purpose (e.g., insurance \
+                        info for a medical appointment)."
+                    ))
+                };
+
+                let primed_content = if conv_prompt.is_empty() && scope_prompt.is_none() {
                     msg.content.clone()
                 } else {
-                    format!("[System context]\n{conv_prompt}\n\n{}", msg.content)
+                    let mut parts = String::from("[System context]\n");
+                    parts.push_str(conv_prompt);
+                    if let Some(ref scope) = scope_prompt {
+                        parts.push_str(scope);
+                    }
+                    parts.push_str("\n\n");
+                    parts.push_str(&msg.content);
+                    parts
                 };
                 Box::pin(run_gateway_chat_with_tools_model(
                     &state,
@@ -2055,6 +2102,8 @@ async fn handle_agentphone_webhook(
                 if is_voice {
                     // For farewell on voice: speak farewell then hang up
                     if intent == AgentPhoneIntent::Farewell {
+                        // Clear outbound session on call end
+                        ap.clear_outbound(&msg.sender);
                         return (
                             StatusCode::OK,
                             Json(serde_json::json!({"text": response, "hangup": true})),

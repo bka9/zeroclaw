@@ -1,8 +1,50 @@
 use super::traits::{Channel, ChannelMessage, SendMessage};
+use crate::config::{PhoneNumberEntry, PhoneTrustLevel};
 use async_trait::async_trait;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 const API_BASE: &str = "https://api.agentphone.to/v1";
+
+/// Default TTL for voice outbound sessions (1 hour).
+const VOICE_SESSION_TTL_SECS: u64 = 3600;
+/// Default TTL for SMS outbound sessions (30 minutes).
+const SMS_SESSION_TTL_SECS: u64 = 1800;
+
+/// Tracks an active outbound call or SMS session so that inbound webhooks
+/// from the counterparty are accepted even if the number is not in the
+/// channel's allowlist.
+#[derive(Debug, Clone)]
+pub struct OutboundSession {
+    /// Call or conversation ID from the AgentPhone API.
+    pub call_id: String,
+    /// Unix timestamp when the session was registered.
+    pub started_at: u64,
+    /// Purpose of this outbound contact (used for information scoping).
+    pub purpose: Option<String>,
+    /// Time-to-live in seconds. Session is expired after `started_at + ttl_secs`.
+    pub ttl_secs: u64,
+}
+
+impl OutboundSession {
+    fn is_expired(&self) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        now > self.started_at + self.ttl_secs
+    }
+}
+
+/// Shared tracker for active outbound sessions. Used by both `AgentPhoneChannel`
+/// and `AgentPhoneTool` to coordinate which numbers have active outbound sessions.
+pub type OutboundSessionTracker = Arc<Mutex<HashMap<String, OutboundSession>>>;
+
+/// Create a new shared outbound session tracker.
+pub fn new_outbound_tracker() -> OutboundSessionTracker {
+    Arc::new(Mutex::new(HashMap::new()))
+}
 
 /// AgentPhone channel — receives inbound SMS and voice call transcripts via webhooks.
 ///
@@ -15,20 +57,21 @@ pub struct AgentPhoneChannel {
     api_key: String,
     webhook_secret: String,
     agent_id: Option<String>,
-    allowed_numbers: Vec<String>,
+    allowed_numbers: Vec<PhoneNumberEntry>,
     voice: Option<String>,
     begin_message: Option<String>,
     conversation_prompt: String,
     model: Option<String>,
     proxy_url: Option<String>,
     http: reqwest::Client,
+    active_outbound: OutboundSessionTracker,
 }
 
 impl AgentPhoneChannel {
     pub fn new(
         api_key: String,
         webhook_secret: String,
-        allowed_numbers: Vec<String>,
+        allowed_numbers: Vec<PhoneNumberEntry>,
     ) -> Self {
         Self {
             api_key,
@@ -41,6 +84,7 @@ impl AgentPhoneChannel {
             model: None,
             proxy_url: None,
             http: reqwest::Client::new(),
+            active_outbound: new_outbound_tracker(),
         }
     }
 
@@ -100,9 +144,103 @@ impl AgentPhoneChannel {
         &self.api_key
     }
 
-    /// Check if a phone number is allowed (E.164 format: +1234567890).
+    /// Set the shared outbound session tracker (called during gateway setup).
+    pub fn with_outbound_tracker(mut self, tracker: OutboundSessionTracker) -> Self {
+        self.active_outbound = tracker;
+        self
+    }
+
+    /// Get a reference to the outbound session tracker.
+    pub fn outbound_tracker(&self) -> &OutboundSessionTracker {
+        &self.active_outbound
+    }
+
+    /// Check if a phone number is in the configured allowlist (E.164 format: +1234567890).
     pub fn is_number_allowed(&self, phone: &str) -> bool {
-        self.allowed_numbers.iter().any(|n| n == "*" || n == phone)
+        self.allowed_numbers
+            .iter()
+            .any(|entry| entry.number() == "*" || entry.number() == phone)
+    }
+
+    /// Check if a phone number is trusted (i.e. in the allowlist with Trusted trust level).
+    /// Returns false for scoped numbers and numbers not in the list.
+    pub fn is_trusted_number(&self, phone: &str) -> bool {
+        self.allowed_numbers.iter().any(|entry| {
+            (entry.number() == "*" || entry.number() == phone)
+                && entry.trust() == PhoneTrustLevel::Trusted
+        })
+    }
+
+    /// Get the trust level for a phone number, if it's in the allowlist.
+    pub fn get_trust_level(&self, phone: &str) -> Option<PhoneTrustLevel> {
+        self.allowed_numbers.iter().find_map(|entry| {
+            if entry.number() == "*" || entry.number() == phone {
+                Some(entry.trust())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Get the configured purpose for a phone number, if any.
+    pub fn get_number_purpose(&self, phone: &str) -> Option<&str> {
+        self.allowed_numbers.iter().find_map(|entry| {
+            if entry.number() == "*" || entry.number() == phone {
+                entry.purpose()
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Check if a phone number has an active (non-expired) outbound session.
+    pub fn has_active_outbound(&self, phone: &str) -> bool {
+        let sessions = self.active_outbound.lock().unwrap();
+        sessions
+            .get(phone)
+            .map(|s| !s.is_expired())
+            .unwrap_or(false)
+    }
+
+    /// Get the purpose from an active outbound session, if one exists.
+    pub fn get_outbound_purpose(&self, phone: &str) -> Option<String> {
+        let sessions = self.active_outbound.lock().unwrap();
+        sessions
+            .get(phone)
+            .filter(|s| !s.is_expired())
+            .and_then(|s| s.purpose.clone())
+    }
+
+    /// Register an active outbound session for a phone number.
+    pub fn register_outbound(&self, phone: &str, call_id: &str, purpose: Option<&str>, is_voice: bool) {
+        let ttl = if is_voice {
+            VOICE_SESSION_TTL_SECS
+        } else {
+            SMS_SESSION_TTL_SECS
+        };
+        let session = OutboundSession {
+            call_id: call_id.to_string(),
+            started_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            purpose: purpose.map(|s| s.to_string()),
+            ttl_secs: ttl,
+        };
+        let mut sessions = self.active_outbound.lock().unwrap();
+        sessions.insert(phone.to_string(), session);
+    }
+
+    /// Clear an active outbound session for a phone number.
+    pub fn clear_outbound(&self, phone: &str) {
+        let mut sessions = self.active_outbound.lock().unwrap();
+        sessions.remove(phone);
+    }
+
+    /// Check whether an inbound webhook from this number should be accepted.
+    /// Accepts if the number is in the allowlist OR has an active outbound session.
+    pub fn should_accept_inbound(&self, phone: &str) -> bool {
+        self.is_number_allowed(phone) || self.has_active_outbound(phone)
     }
 
     /// Sync voice and begin_message to the AgentPhone agent on startup.
@@ -135,14 +273,14 @@ impl AgentPhoneChannel {
             .send()
             .await?;
 
-        if !resp.status().is_success() {
+        if resp.status().is_success() {
+            tracing::info!("AgentPhone: synced agent {agent_id} voice/greeting config");
+        } else {
             let status = resp.status();
             let error_body = resp.text().await.unwrap_or_default();
             tracing::warn!(
                 "AgentPhone: failed to sync agent config: {status} — {error_body}"
             );
-        } else {
-            tracing::info!("AgentPhone: synced agent {agent_id} voice/greeting config");
         }
 
         Ok(())
@@ -293,8 +431,8 @@ impl AgentPhoneChannel {
             format!("+{from}")
         };
 
-        // Check allowlist
-        if !self.is_number_allowed(&normalized_from) {
+        // Check allowlist or active outbound session
+        if !self.should_accept_inbound(&normalized_from) {
             tracing::warn!(
                 "AgentPhone: ignoring message from unauthorized number: {normalized_from}. \
                 Add to channels_config.agentphone.allowed_numbers in config.toml."
@@ -360,7 +498,7 @@ impl AgentPhoneChannel {
             .and_then(|t| {
                 chrono::DateTime::parse_from_rfc3339(t)
                     .ok()
-                    .map(|dt| dt.timestamp() as u64)
+                    .map(|dt| dt.timestamp().cast_unsigned())
             })
             .unwrap_or_else(|| {
                 std::time::SystemTime::now()
@@ -409,8 +547,8 @@ impl Channel for AgentPhoneChannel {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("AgentPhone: agent_id required to send messages"))?;
 
-        // Check outbound allowlist
-        if !self.is_number_allowed(&message.recipient) {
+        // Check outbound allowlist or active outbound session
+        if !self.is_number_allowed(&message.recipient) && !self.has_active_outbound(&message.recipient) {
             anyhow::bail!(
                 "AgentPhone: recipient {} is not in allowed_numbers",
                 message.recipient
@@ -520,12 +658,13 @@ impl Channel for AgentPhoneChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::PhoneNumberConfig;
 
     fn make_channel() -> AgentPhoneChannel {
         AgentPhoneChannel::new(
             "test-api-key".into(),
             "test-webhook-secret".into(),
-            vec!["+15551234567".into()],
+            vec![PhoneNumberEntry::Simple("+15551234567".into())],
         )
         .with_agent_id(Some("agt_test123".into()))
     }
@@ -548,7 +687,7 @@ mod tests {
         let ch = AgentPhoneChannel::new(
             "key".into(),
             "secret".into(),
-            vec!["*".into()],
+            vec![PhoneNumberEntry::Simple("*".into())],
         );
         assert!(ch.is_number_allowed("+15559999999"));
     }
@@ -557,6 +696,97 @@ mod tests {
     fn is_number_allowed_empty_denies_all() {
         let ch = AgentPhoneChannel::new("key".into(), "secret".into(), vec![]);
         assert!(!ch.is_number_allowed("+15551234567"));
+    }
+
+    #[test]
+    fn trusted_number_check() {
+        let ch = AgentPhoneChannel::new(
+            "key".into(),
+            "secret".into(),
+            vec![
+                PhoneNumberEntry::Simple("+15551234567".into()),
+                PhoneNumberEntry::Detailed(PhoneNumberConfig {
+                    number: "+15559876543".into(),
+                    trust: PhoneTrustLevel::Scoped,
+                    purpose: Some("dentist appointment".into()),
+                }),
+            ],
+        );
+        assert!(ch.is_trusted_number("+15551234567"));
+        assert!(!ch.is_trusted_number("+15559876543"));
+        assert!(!ch.is_trusted_number("+15550000000"));
+    }
+
+    #[test]
+    fn get_trust_level_and_purpose() {
+        let ch = AgentPhoneChannel::new(
+            "key".into(),
+            "secret".into(),
+            vec![
+                PhoneNumberEntry::Simple("+15551234567".into()),
+                PhoneNumberEntry::Detailed(PhoneNumberConfig {
+                    number: "+15559876543".into(),
+                    trust: PhoneTrustLevel::Scoped,
+                    purpose: Some("appointment scheduling".into()),
+                }),
+            ],
+        );
+        assert_eq!(ch.get_trust_level("+15551234567"), Some(PhoneTrustLevel::Trusted));
+        assert_eq!(ch.get_trust_level("+15559876543"), Some(PhoneTrustLevel::Scoped));
+        assert_eq!(ch.get_trust_level("+15550000000"), None);
+        assert_eq!(ch.get_number_purpose("+15551234567"), None);
+        assert_eq!(ch.get_number_purpose("+15559876543"), Some("appointment scheduling"));
+    }
+
+    #[test]
+    fn outbound_session_tracking() {
+        let ch = make_channel();
+        let number = "+15559999999";
+
+        // No session → not accepted
+        assert!(!ch.has_active_outbound(number));
+        assert!(!ch.should_accept_inbound(number));
+
+        // Register session → accepted
+        ch.register_outbound(number, "call_123", Some("dentist"), true);
+        assert!(ch.has_active_outbound(number));
+        assert!(ch.should_accept_inbound(number));
+        assert_eq!(ch.get_outbound_purpose(number), Some("dentist".to_string()));
+
+        // Clear session → not accepted
+        ch.clear_outbound(number);
+        assert!(!ch.has_active_outbound(number));
+        assert!(!ch.should_accept_inbound(number));
+    }
+
+    #[test]
+    fn outbound_session_allows_webhook_parsing() {
+        let ch = make_channel();
+        let number = "+15559999999";
+
+        // Without session, unauthorized number is dropped
+        let payload = serde_json::json!({
+            "event": "agent.message",
+            "channel": "voice",
+            "timestamp": "2025-01-15T14:00:05Z",
+            "data": {
+                "callId": "call_abc123",
+                "from": number,
+                "to": "+15550001111",
+                "transcript": "Yes, we have an opening at 3pm",
+                "confidence": 0.92,
+                "direction": "inbound"
+            }
+        });
+        assert!(ch.parse_webhook_payload(&payload).is_empty());
+
+        // Register outbound session
+        ch.register_outbound(number, "call_abc123", Some("schedule appointment"), true);
+
+        // Now the same webhook is accepted
+        let messages = ch.parse_webhook_payload(&payload);
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].content.contains("opening at 3pm"));
     }
 
     #[test]
@@ -649,7 +879,7 @@ mod tests {
 
     #[test]
     fn verify_signature_no_secret_accepts_all() {
-        let ch = AgentPhoneChannel::new("key".into(), String::new(), vec![]);
+        let ch = AgentPhoneChannel::new("key".into(), String::new(), Vec::new());
         assert!(ch.verify_signature(b"body", None, None));
     }
 
@@ -665,7 +895,7 @@ mod tests {
         use sha2::Sha256;
 
         let secret = "test-webhook-secret";
-        let ch = AgentPhoneChannel::new("key".into(), secret.into(), vec![]);
+        let ch = AgentPhoneChannel::new("key".into(), secret.into(), Vec::new());
 
         // Use current timestamp to avoid replay protection rejection
         let now = std::time::SystemTime::now()

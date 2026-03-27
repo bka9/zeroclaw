@@ -3900,6 +3900,7 @@ pub async fn run(
         config.api_key.as_deref(),
         &config,
         None,
+        None, // agentphone outbound tracker — not used in CLI loop context
     );
 
     let peripheral_tools: Vec<Box<dyn Tool>> =
@@ -4811,6 +4812,7 @@ pub async fn process_message(
         config.api_key.as_deref(),
         &config,
         None,
+        None, // agentphone outbound tracker — not used in plan-mode context
     );
     let peripheral_tools: Vec<Box<dyn Tool>> =
         crate::peripherals::create_peripheral_tools(&config.peripherals).await?;

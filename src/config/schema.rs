@@ -8014,6 +8014,76 @@ impl Default for XConfig {
     }
 }
 
+/// Trust level for a phone number entry.
+///
+/// Controls whether the number is fully trusted (bidirectional, full context)
+/// or scoped (outbound-only with information disclosure limits).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum PhoneTrustLevel {
+    /// Full bidirectional access with no information scoping.
+    #[default]
+    Trusted,
+    /// Outbound-only: agent can call/text this number, but unsolicited inbound
+    /// is rejected. Information shared during conversations is scoped to the
+    /// declared `purpose`.
+    Scoped,
+}
+
+/// Detailed phone number entry with trust level and optional purpose.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PhoneNumberConfig {
+    /// Phone number in E.164 format (e.g. `"+15551234567"`).
+    pub number: String,
+    /// Trust level. Default: `trusted`.
+    #[serde(default)]
+    pub trust: PhoneTrustLevel,
+    /// Purpose constraint for conversations with this number.
+    /// When set, the agent's information disclosure is scoped to this purpose.
+    #[serde(default)]
+    pub purpose: Option<String>,
+}
+
+/// A phone number entry — either a simple E.164 string (trusted by default)
+/// or a detailed object with trust level and purpose.
+///
+/// Backward-compatible: existing `["+15551234567"]` configs deserialize as
+/// `Simple(...)`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum PhoneNumberEntry {
+    /// Simple phone number string — treated as trusted.
+    Simple(String),
+    /// Detailed entry with trust level and optional purpose.
+    Detailed(PhoneNumberConfig),
+}
+
+impl PhoneNumberEntry {
+    /// Get the phone number string.
+    pub fn number(&self) -> &str {
+        match self {
+            Self::Simple(n) => n,
+            Self::Detailed(c) => &c.number,
+        }
+    }
+
+    /// Get the trust level (defaults to Trusted for simple entries).
+    pub fn trust(&self) -> PhoneTrustLevel {
+        match self {
+            Self::Simple(_) => PhoneTrustLevel::Trusted,
+            Self::Detailed(c) => c.trust,
+        }
+    }
+
+    /// Get the purpose constraint, if any.
+    pub fn purpose(&self) -> Option<&str> {
+        match self {
+            Self::Simple(_) => None,
+            Self::Detailed(c) => c.purpose.as_deref(),
+        }
+    }
+}
+
 /// AgentPhone telephony integration configuration (`[agentphone]`).
 ///
 /// When `enabled = true`, registers the `agentphone` tool for sending SMS,
@@ -8026,6 +8096,8 @@ impl Default for XConfig {
 /// ## Security
 /// The `allowed_numbers` list restricts which phone numbers (E.164 format)
 /// the agent may contact. Empty list denies all outbound; `["*"]` allows any.
+/// Each entry can be a simple string (trusted) or a detailed object with
+/// `trust` and `purpose` fields for scoped access.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AgentPhoneConfig {
     /// Enable the `agentphone` tool. Default: `false`.
@@ -8042,8 +8114,9 @@ pub struct AgentPhoneConfig {
     pub default_from_number_id: Option<String>,
     /// Allowed destination phone numbers (E.164 format, e.g. `"+15551234567"`).
     /// Empty list denies all outbound; `["*"]` allows any number.
+    /// Each entry can be a simple string (trusted) or `{ number, trust, purpose }`.
     #[serde(default)]
-    pub allowed_numbers: Vec<String>,
+    pub allowed_numbers: Vec<PhoneNumberEntry>,
     /// Actions the agent is permitted to call.
     /// Defaults to read-only actions.
     #[serde(default = "default_agentphone_allowed_actions")]
@@ -8103,8 +8176,10 @@ pub struct AgentPhoneChannelConfig {
     pub agent_id: Option<String>,
     /// Allowed caller/sender phone numbers (E.164 format).
     /// Empty list denies all inbound; `["*"]` allows any caller.
+    /// Each entry can be a simple string (trusted) or `{ number, trust, purpose }`.
+    /// Scoped numbers only accept inbound during active outbound sessions.
     #[serde(default)]
-    pub allowed_numbers: Vec<String>,
+    pub allowed_numbers: Vec<PhoneNumberEntry>,
     /// TTS voice for inbound calls (synced to AgentPhone agent on startup).
     #[serde(default)]
     pub voice: Option<String>,
