@@ -245,9 +245,8 @@ impl AgentPhoneChannel {
     }
 
     /// Check whether an inbound webhook from this number should be accepted.
-    /// Accepts if the number is in the allowlist OR has an active outbound session.
     pub fn should_accept_inbound(&self, phone: &str) -> bool {
-        self.is_number_allowed(phone) || self.has_active_outbound(phone)
+        self.is_number_allowed(phone)
     }
 
     /// Sync voice and begin_message to the AgentPhone agent on startup.
@@ -460,10 +459,10 @@ impl AgentPhoneChannel {
             normalized_from.clone()
         };
 
-        // Check allowlist or active outbound session
-        if !self.should_accept_inbound(&counterparty) {
+        // Check allowlist or active outbound session against the original sender
+        if !self.should_accept_inbound(&normalized_from) {
             tracing::warn!(
-                "AgentPhone: ignoring message from unauthorized number: {counterparty}. \
+                "AgentPhone: ignoring message from unauthorized number: {normalized_from}. \
                 Add to channels_config.agentphone.allowed_numbers in config.toml."
             );
             return messages;
@@ -772,50 +771,30 @@ mod tests {
         let ch = make_channel();
         let number = "+15559999999";
 
-        // No session → not accepted
+        // No session
         assert!(!ch.has_active_outbound(number));
-        assert!(!ch.should_accept_inbound(number));
 
-        // Register session → accepted
+        // Register session
         ch.register_outbound(number, "call_123", Some("dentist"), true);
         assert!(ch.has_active_outbound(number));
-        assert!(ch.should_accept_inbound(number));
         assert_eq!(ch.get_outbound_purpose(number), Some("dentist".to_string()));
 
-        // Clear session → not accepted
+        // Clear session
         ch.clear_outbound(number);
         assert!(!ch.has_active_outbound(number));
-        assert!(!ch.should_accept_inbound(number));
     }
 
     #[test]
-    fn outbound_session_allows_webhook_parsing() {
+    fn should_accept_inbound_uses_allowlist_only() {
         let ch = make_channel();
+
+        // Allowed number is accepted
+        assert!(ch.should_accept_inbound("+15551234567"));
+
+        // Unknown number is rejected even with active outbound session
         let number = "+15559999999";
-
-        // Without session, unauthorized number is dropped
-        let payload = serde_json::json!({
-            "event": "agent.message",
-            "channel": "voice",
-            "timestamp": "2025-01-15T14:00:05Z",
-            "data": {
-                "callId": "call_abc123",
-                "from": number,
-                "to": "+15550001111",
-                "transcript": "Yes, we have an opening at 3pm",
-                "confidence": 0.92,
-                "direction": "inbound"
-            }
-        });
-        assert!(ch.parse_webhook_payload(&payload).is_empty());
-
-        // Register outbound session
-        ch.register_outbound(number, "call_abc123", Some("schedule appointment"), true);
-
-        // Now the same webhook is accepted
-        let messages = ch.parse_webhook_payload(&payload);
-        assert_eq!(messages.len(), 1);
-        assert!(messages[0].content.contains("opening at 3pm"));
+        ch.register_outbound(number, "call_123", None, true);
+        assert!(!ch.should_accept_inbound(number));
     }
 
     #[test]
