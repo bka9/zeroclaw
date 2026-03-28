@@ -57,6 +57,7 @@ pub struct AgentPhoneChannel {
     api_key: String,
     webhook_secret: String,
     agent_id: Option<String>,
+    agent_phone_number: Option<String>,
     allowed_numbers: Vec<PhoneNumberEntry>,
     voice: Option<String>,
     begin_message: Option<String>,
@@ -78,6 +79,7 @@ impl AgentPhoneChannel {
             webhook_secret,
             allowed_numbers,
             agent_id: None,
+            agent_phone_number: None,
             voice: None,
             begin_message: None,
             conversation_prompt: String::new(),
@@ -90,6 +92,11 @@ impl AgentPhoneChannel {
 
     pub fn with_agent_id(mut self, agent_id: Option<String>) -> Self {
         self.agent_id = agent_id;
+        self
+    }
+
+    pub fn with_agent_phone_number(mut self, number: Option<String>) -> Self {
+        self.agent_phone_number = number;
         self
     }
 
@@ -420,21 +427,43 @@ impl AgentPhoneChannel {
         };
 
         let from = data.get("from").and_then(|v| v.as_str()).unwrap_or("");
+        let to = data.get("to").and_then(|v| v.as_str()).unwrap_or("");
         if from.is_empty() {
             return messages;
         }
 
-        // Normalize phone number to E.164
+        // Normalize phone numbers to E.164
         let normalized_from = if from.starts_with('+') {
             from.to_string()
         } else {
             format!("+{from}")
         };
 
+        // Resolve the counterparty: if `from` is the agent's own number, the
+        // counterparty is `to`; otherwise it's `from`.
+        let counterparty = if let Some(ref agent_num) = self.agent_phone_number {
+            if normalized_from == *agent_num {
+                let normalized_to = if to.starts_with('+') {
+                    to.to_string()
+                } else {
+                    format!("+{to}")
+                };
+                if normalized_to.is_empty() || normalized_to == "+" {
+                    normalized_from.clone()
+                } else {
+                    normalized_to
+                }
+            } else {
+                normalized_from.clone()
+            }
+        } else {
+            normalized_from.clone()
+        };
+
         // Check allowlist or active outbound session
-        if !self.should_accept_inbound(&normalized_from) {
+        if !self.should_accept_inbound(&counterparty) {
             tracing::warn!(
-                "AgentPhone: ignoring message from unauthorized number: {normalized_from}. \
+                "AgentPhone: ignoring message from unauthorized number: {counterparty}. \
                 Add to channels_config.agentphone.allowed_numbers in config.toml."
             );
             return messages;
@@ -478,7 +507,7 @@ impl AgentPhoneChannel {
         let mut content_parts = Vec::new();
 
         // 1. Recent conversation history (chronological log from AgentPhone)
-        if let Some(history) = Self::format_recent_history(payload, channel, &normalized_from) {
+        if let Some(history) = Self::format_recent_history(payload, channel, &counterparty) {
             content_parts.push(history);
         }
 
@@ -519,8 +548,8 @@ impl AgentPhoneChannel {
 
         messages.push(ChannelMessage {
             id: Uuid::new_v4().to_string(),
-            reply_target: normalized_from.clone(),
-            sender: normalized_from,
+            reply_target: counterparty.clone(),
+            sender: counterparty,
             content,
             channel: typed_channel,
             timestamp,

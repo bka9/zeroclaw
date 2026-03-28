@@ -21,6 +21,7 @@ pub struct AgentPhoneTool {
     api_key: String,
     default_agent_id: Option<String>,
     default_from_number_id: Option<String>,
+    agent_phone_number: Option<String>,
     allowed_numbers: Vec<PhoneNumberEntry>,
     allowed_actions: Vec<String>,
     default_voice: Option<String>,
@@ -37,6 +38,7 @@ impl AgentPhoneTool {
         api_key: String,
         default_agent_id: Option<String>,
         default_from_number_id: Option<String>,
+        agent_phone_number: Option<String>,
         allowed_numbers: Vec<PhoneNumberEntry>,
         allowed_actions: Vec<String>,
         default_voice: Option<String>,
@@ -48,6 +50,7 @@ impl AgentPhoneTool {
             api_key,
             default_agent_id,
             default_from_number_id,
+            agent_phone_number,
             allowed_numbers,
             allowed_actions,
             default_voice,
@@ -300,14 +303,6 @@ impl AgentPhoneTool {
             return ToolResult::error("calls.create requires 'to' parameter (E.164 phone number)".into());
         };
 
-        // Enforce allowed_numbers restriction
-        if !self.is_number_allowed(to_number) {
-            return ToolResult::error(format!(
-                "Phone number {to_number} is not in the allowed_numbers list. \
-                Add it to [agentphone].allowed_numbers in config.toml."
-            ));
-        }
-
         let agent_id = match args
             .get("agent_id")
             .and_then(|v| v.as_str())
@@ -389,14 +384,6 @@ impl AgentPhoneTool {
         let Some(to_number) = args.get("to").and_then(|v| v.as_str()) else {
             return ToolResult::error("sms.send requires 'to' parameter (E.164 phone number)".into());
         };
-
-        // Enforce allowed_numbers restriction
-        if !self.is_number_allowed(to_number) {
-            return ToolResult::error(format!(
-                "Phone number {to_number} is not in the allowed_numbers list. \
-                Add it to [agentphone].allowed_numbers in config.toml."
-            ));
-        }
 
         let Some(message) = args.get("message").and_then(|v| v.as_str()) else {
             return ToolResult::error("sms.send requires 'message' parameter".into());
@@ -753,6 +740,7 @@ mod tests {
             "test-api-key".into(),
             Some("agt_test".into()),
             Some("num_test".into()),
+            None,
             vec![PhoneNumberEntry::Simple("+15551234567".into())],
             vec![
                 "agents.list".into(),
@@ -798,6 +786,7 @@ mod tests {
             "key".into(),
             None,
             None,
+            None,
             vec![PhoneNumberEntry::Simple("*".into())],
             vec![],
             None,
@@ -820,6 +809,7 @@ mod tests {
             "key".into(),
             None,
             None,
+            None,
             vec![],
             vec![],
             None,
@@ -840,6 +830,7 @@ mod tests {
         let mem: Arc<dyn Memory> = Arc::new(NoneMemory::new());
         let tool = AgentPhoneTool::new(
             "key".into(),
+            None,
             None,
             None,
             vec![

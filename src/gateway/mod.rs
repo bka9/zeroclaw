@@ -712,6 +712,10 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
                     ap_cfg.allowed_numbers.clone(),
                 )
                 .with_agent_id(ap_cfg.agent_id.clone())
+                .with_agent_phone_number(
+                    ap_cfg.agent_phone_number.clone()
+                        .or_else(|| config.agentphone.agent_phone_number.clone()),
+                )
                 .with_voice(ap_cfg.voice.clone())
                 .with_begin_message(ap_cfg.begin_message.clone())
                 .with_conversation_prompt(ap_cfg.conversation_prompt.clone())

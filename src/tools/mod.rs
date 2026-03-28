@@ -710,6 +710,7 @@ pub fn all_tools_with_runtime(
                 api_key,
                 root_config.agentphone.default_agent_id.clone(),
                 root_config.agentphone.default_from_number_id.clone(),
+                root_config.agentphone.agent_phone_number.clone(),
                 root_config.agentphone.allowed_numbers.clone(),
                 root_config.agentphone.allowed_actions.clone(),
                 root_config.agentphone.voice.clone(),

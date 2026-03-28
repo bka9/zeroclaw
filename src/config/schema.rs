@@ -8121,6 +8121,12 @@ pub struct AgentPhoneConfig {
     /// Defaults to read-only actions.
     #[serde(default = "default_agentphone_allowed_actions")]
     pub allowed_actions: Vec<String>,
+    /// The agent's own phone number (E.164 format, e.g. `"+15550001111"`).
+    /// Used to identify outbound messages where `from` is the agent and `to`
+    /// is the counterparty, so that conversation memory is keyed by the
+    /// counterparty's number rather than the agent's.
+    #[serde(default)]
+    pub agent_phone_number: Option<String>,
     /// Default TTS voice for outbound calls (e.g. `"Polly.Amy"`).
     #[serde(default)]
     pub voice: Option<String>,
@@ -8151,6 +8157,7 @@ impl Default for AgentPhoneConfig {
             default_from_number_id: None,
             allowed_numbers: Vec::new(),
             allowed_actions: default_agentphone_allowed_actions(),
+            agent_phone_number: None,
             voice: None,
             begin_message: None,
         }
@@ -8180,6 +8187,12 @@ pub struct AgentPhoneChannelConfig {
     /// Scoped numbers only accept inbound during active outbound sessions.
     #[serde(default)]
     pub allowed_numbers: Vec<PhoneNumberEntry>,
+    /// The agent's own phone number (E.164 format, e.g. `"+15550001111"`).
+    /// When a webhook's `from` matches this number, the `to` field is used as
+    /// the counterparty for session/memory keying instead.
+    /// Falls back to `[agentphone].agent_phone_number`.
+    #[serde(default)]
+    pub agent_phone_number: Option<String>,
     /// TTS voice for inbound calls (synced to AgentPhone agent on startup).
     #[serde(default)]
     pub voice: Option<String>,
