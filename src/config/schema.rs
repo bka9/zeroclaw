@@ -374,6 +374,10 @@ pub struct Config {
     #[serde(default)]
     pub x: XConfig,
 
+    /// AgentPhone telephony integration configuration (`[agentphone]`).
+    #[serde(default)]
+    pub agentphone: AgentPhoneConfig,
+
     /// Budget / financial-planning integration configuration (`[budget]`).
     #[serde(default)]
     pub budget: BudgetConfig,
@@ -6112,6 +6116,8 @@ pub struct ChannelsConfig {
     pub bluesky: Option<BlueskyConfig>,
     /// Voice call channel configuration (Twilio/Telnyx/Plivo).
     pub voice_call: Option<crate::channels::voice_call::VoiceCallConfig>,
+    /// AgentPhone telephony channel configuration (SMS + voice via webhook).
+    pub agentphone: Option<AgentPhoneChannelConfig>,
     /// Voice wake word detection channel configuration.
     #[cfg(feature = "voice-wake")]
     pub voice_wake: Option<VoiceWakeConfig>,
@@ -6301,6 +6307,7 @@ impl Default for ChannelsConfig {
             reddit: None,
             bluesky: None,
             voice_call: None,
+            agentphone: None,
             #[cfg(feature = "voice-wake")]
             voice_wake: None,
             message_timeout_secs: default_channel_message_timeout_secs(),
@@ -8007,6 +8014,217 @@ impl Default for XConfig {
     }
 }
 
+/// Trust level for a phone number entry.
+///
+/// Controls whether the number is fully trusted (bidirectional, full context)
+/// or scoped (outbound-only with information disclosure limits).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum PhoneTrustLevel {
+    /// Full bidirectional access with no information scoping.
+    #[default]
+    Trusted,
+    /// Outbound-only: agent can call/text this number, but unsolicited inbound
+    /// is rejected. Information shared during conversations is scoped to the
+    /// declared `purpose`.
+    Scoped,
+}
+
+/// Detailed phone number entry with trust level and optional purpose.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PhoneNumberConfig {
+    /// Phone number in E.164 format (e.g. `"+15551234567"`).
+    pub number: String,
+    /// Trust level. Default: `trusted`.
+    #[serde(default)]
+    pub trust: PhoneTrustLevel,
+    /// Purpose constraint for conversations with this number.
+    /// When set, the agent's information disclosure is scoped to this purpose.
+    #[serde(default)]
+    pub purpose: Option<String>,
+}
+
+/// A phone number entry — either a simple E.164 string (trusted by default)
+/// or a detailed object with trust level and purpose.
+///
+/// Backward-compatible: existing `["+15551234567"]` configs deserialize as
+/// `Simple(...)`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum PhoneNumberEntry {
+    /// Simple phone number string — treated as trusted.
+    Simple(String),
+    /// Detailed entry with trust level and optional purpose.
+    Detailed(PhoneNumberConfig),
+}
+
+impl PhoneNumberEntry {
+    /// Get the phone number string.
+    pub fn number(&self) -> &str {
+        match self {
+            Self::Simple(n) => n,
+            Self::Detailed(c) => &c.number,
+        }
+    }
+
+    /// Get the trust level (defaults to Trusted for simple entries).
+    pub fn trust(&self) -> PhoneTrustLevel {
+        match self {
+            Self::Simple(_) => PhoneTrustLevel::Trusted,
+            Self::Detailed(c) => c.trust,
+        }
+    }
+
+    /// Get the purpose constraint, if any.
+    pub fn purpose(&self) -> Option<&str> {
+        match self {
+            Self::Simple(_) => None,
+            Self::Detailed(c) => c.purpose.as_deref(),
+        }
+    }
+}
+
+/// AgentPhone telephony integration configuration (`[agentphone]`).
+///
+/// When `enabled = true`, registers the `agentphone` tool for sending SMS,
+/// placing outbound calls, managing agents/numbers, and querying usage.
+///
+/// ## Auth
+/// All endpoints use Bearer token auth via `api_key` (falls back to
+/// `AGENTPHONE_API_KEY` env var).
+///
+/// ## Security
+/// The `allowed_numbers` list restricts which phone numbers (E.164 format)
+/// the agent may contact. Empty list denies all outbound; `["*"]` allows any.
+/// Each entry can be a simple string (trusted) or a detailed object with
+/// `trust` and `purpose` fields for scoped access.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AgentPhoneConfig {
+    /// Enable the `agentphone` tool. Default: `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// AgentPhone API key. Falls back to `AGENTPHONE_API_KEY` env var.
+    #[serde(default)]
+    pub api_key: String,
+    /// Default AgentPhone agent ID for outbound calls/SMS.
+    #[serde(default)]
+    pub default_agent_id: Option<String>,
+    /// Default phone number ID to use as caller/sender.
+    #[serde(default)]
+    pub default_from_number_id: Option<String>,
+    /// Allowed destination phone numbers (E.164 format, e.g. `"+15551234567"`).
+    /// Empty list denies all outbound; `["*"]` allows any number.
+    /// Each entry can be a simple string (trusted) or `{ number, trust, purpose }`.
+    #[serde(default)]
+    pub allowed_numbers: Vec<PhoneNumberEntry>,
+    /// Actions the agent is permitted to call.
+    /// Defaults to read-only actions.
+    #[serde(default = "default_agentphone_allowed_actions")]
+    pub allowed_actions: Vec<String>,
+    /// Default TTS voice for outbound calls (e.g. `"Polly.Amy"`).
+    #[serde(default)]
+    pub voice: Option<String>,
+    /// Default greeting message spoken at the start of outbound calls.
+    #[serde(default)]
+    pub begin_message: Option<String>,
+}
+
+fn default_agentphone_allowed_actions() -> Vec<String> {
+    vec![
+        "agents.list".to_string(),
+        "agents.get".to_string(),
+        "numbers.list".to_string(),
+        "calls.list".to_string(),
+        "calls.get".to_string(),
+        "conversations.list".to_string(),
+        "conversations.get".to_string(),
+        "usage.get".to_string(),
+    ]
+}
+
+impl Default for AgentPhoneConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_key: String::new(),
+            default_agent_id: None,
+            default_from_number_id: None,
+            allowed_numbers: Vec::new(),
+            allowed_actions: default_agentphone_allowed_actions(),
+            voice: None,
+            begin_message: None,
+        }
+    }
+}
+
+/// AgentPhone channel configuration (`[channels_config.agentphone]`).
+///
+/// Receives inbound SMS and voice call transcripts via AgentPhone webhooks.
+/// The `allowed_numbers` list restricts which callers/senders are accepted.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AgentPhoneChannelConfig {
+    /// AgentPhone API key for sending outbound replies.
+    /// Falls back to `[agentphone].api_key` or `AGENTPHONE_API_KEY` env var.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Webhook signing secret for HMAC-SHA256 verification.
+    /// Falls back to `AGENTPHONE_WEBHOOK_SECRET` env var.
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
+    /// Scope webhooks to a specific AgentPhone agent ID.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    /// Allowed caller/sender phone numbers (E.164 format).
+    /// Empty list denies all inbound; `["*"]` allows any caller.
+    /// Each entry can be a simple string (trusted) or `{ number, trust, purpose }`.
+    /// Scoped numbers only accept inbound during active outbound sessions.
+    #[serde(default)]
+    pub allowed_numbers: Vec<PhoneNumberEntry>,
+    /// TTS voice for inbound calls (synced to AgentPhone agent on startup).
+    #[serde(default)]
+    pub voice: Option<String>,
+    /// Introductory greeting when an inbound call is answered
+    /// (synced to AgentPhone agent on startup).
+    #[serde(default)]
+    pub begin_message: Option<String>,
+    /// Per-channel proxy URL (http, https, socks5, socks5h).
+    #[serde(default)]
+    pub proxy_url: Option<String>,
+    /// LLM model override for this channel. When set, all AgentPhone
+    /// interactions (classification, greeting/farewell, and full agent
+    /// pipeline) use this model instead of the global `default_model`.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// System prompt preamble for conversational interactions (Request/Response).
+    /// Prepended to the caller's message to prime the agent for voice/SMS
+    /// context.  Uses a speech-optimised default when not set.
+    #[serde(default = "default_ap_conversation_prompt")]
+    pub conversation_prompt: String,
+}
+
+fn default_ap_conversation_prompt() -> String {
+    "You are a live voice and messaging assistant engaged in a real-time \
+     phone call or text conversation. Respond as if you are speaking \
+     directly to the person — use natural, spoken language.\n\n\
+     Guidelines:\n\
+     - Keep responses concise and conversational. Aim for 1–3 sentences \
+       unless the caller asks for detail.\n\
+     - Never use markdown, bullet points, numbered lists, code blocks, or \
+       any visual formatting. Your output will be read aloud by a \
+       text-to-speech engine or displayed as a plain text message.\n\
+     - Use contractions, filler phrases, and natural speech patterns \
+       (\"Sure thing\", \"Let me check\", \"Got it\") to sound human.\n\
+     - When relaying structured data (lists, steps), narrate them \
+       conversationally (\"First you'll want to…, then…\").\n\
+     - If the conversation history is provided, use it to maintain \
+       continuity — reference what was already discussed rather than \
+       repeating yourself.\n\
+     - If you don't know the answer, say so plainly and offer to help \
+       find out.\n\
+     - Match the caller's energy and formality level."
+        .into()
+}
+
 /// Usage monitoring configuration for the X API (`[x.usage]`).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct XUsageConfig {
@@ -8604,6 +8822,7 @@ impl Default for Config {
             notion: NotionConfig::default(),
             jira: JiraConfig::default(),
             x: XConfig::default(),
+            agentphone: AgentPhoneConfig::default(),
             budget: BudgetConfig::default(),
             issue_tracker: IssueTrackerConfig::default(),
             nutrition: NutritionConfig::default(),
@@ -9215,6 +9434,9 @@ impl Config {
             if let Some(ref mut pinggy) = config.tunnel.pinggy {
                 decrypt_optional_secret(&store, &mut pinggy.token, "config.tunnel.pinggy.token")?;
             }
+            if let Some(ref mut ngrok) = config.tunnel.ngrok {
+                decrypt_secret(&store, &mut ngrok.auth_token, "config.tunnel.ngrok.auth_token")?;
+            }
             decrypt_optional_secret(
                 &store,
                 &mut config.microsoft365.client_secret,
@@ -9601,6 +9823,27 @@ impl Config {
                     &store,
                     &mut config.x.oauth_token_secret,
                     "config.x.oauth_token_secret",
+                )?;
+            }
+
+            // AgentPhone secrets
+            if !config.agentphone.api_key.is_empty() {
+                decrypt_secret(
+                    &store,
+                    &mut config.agentphone.api_key,
+                    "config.agentphone.api_key",
+                )?;
+            }
+            if let Some(ref mut ap) = config.channels_config.agentphone {
+                decrypt_optional_secret(
+                    &store,
+                    &mut ap.api_key,
+                    "config.channels_config.agentphone.api_key",
+                )?;
+                decrypt_optional_secret(
+                    &store,
+                    &mut ap.webhook_secret,
+                    "config.channels_config.agentphone.webhook_secret",
                 )?;
             }
 
@@ -10855,6 +11098,9 @@ impl Config {
         if let Some(ref mut pinggy) = config_to_save.tunnel.pinggy {
             encrypt_optional_secret(&store, &mut pinggy.token, "config.tunnel.pinggy.token")?;
         }
+        if let Some(ref mut ngrok) = config_to_save.tunnel.ngrok {
+            encrypt_secret(&store, &mut ngrok.auth_token, "config.tunnel.ngrok.auth_token")?;
+        }
         encrypt_optional_secret(
             &store,
             &mut config_to_save.microsoft365.client_secret,
@@ -11257,6 +11503,27 @@ impl Config {
                 &store,
                 &mut config_to_save.x.oauth_token_secret,
                 "config.x.oauth_token_secret",
+            )?;
+        }
+
+        // AgentPhone secrets
+        if !config_to_save.agentphone.api_key.is_empty() {
+            encrypt_secret(
+                &store,
+                &mut config_to_save.agentphone.api_key,
+                "config.agentphone.api_key",
+            )?;
+        }
+        if let Some(ref mut ap) = config_to_save.channels_config.agentphone {
+            encrypt_optional_secret(
+                &store,
+                &mut ap.api_key,
+                "config.channels_config.agentphone.api_key",
+            )?;
+            encrypt_optional_secret(
+                &store,
+                &mut ap.webhook_secret,
+                "config.channels_config.agentphone.webhook_secret",
             )?;
         }
 
@@ -11961,6 +12228,7 @@ auto_save = true
                 reddit: None,
                 bluesky: None,
                 voice_call: None,
+                agentphone: None,
                 #[cfg(feature = "voice-wake")]
                 voice_wake: None,
                 message_timeout_secs: 300,
@@ -12007,6 +12275,7 @@ auto_save = true
             notion: NotionConfig::default(),
             jira: JiraConfig::default(),
             x: XConfig::default(),
+            agentphone: AgentPhoneConfig::default(),
             budget: BudgetConfig::default(),
             issue_tracker: IssueTrackerConfig::default(),
             nutrition: NutritionConfig::default(),
@@ -12539,6 +12808,7 @@ default_temperature = 0.7
             notion: NotionConfig::default(),
             jira: JiraConfig::default(),
             x: XConfig::default(),
+            agentphone: AgentPhoneConfig::default(),
             budget: BudgetConfig::default(),
             issue_tracker: IssueTrackerConfig::default(),
             nutrition: NutritionConfig::default(),
@@ -12994,6 +13264,7 @@ allowed_users = ["@ops:matrix.org"]
             reddit: None,
             bluesky: None,
             voice_call: None,
+            agentphone: None,
             #[cfg(feature = "voice-wake")]
             voice_wake: None,
             message_timeout_secs: 300,
@@ -13360,6 +13631,7 @@ channel_ids = ["C123", "D456"]
             reddit: None,
             bluesky: None,
             voice_call: None,
+            agentphone: None,
             #[cfg(feature = "voice-wake")]
             voice_wake: None,
             message_timeout_secs: 300,

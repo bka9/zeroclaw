@@ -15,6 +15,7 @@
 //! To add a new tool, implement [`Tool`] in a new submodule and register it in
 //! [`all_tools_with_runtime`]. See `AGENTS.md` §7.3 for the full change playbook.
 
+pub mod agentphone_tool;
 pub mod ask_user;
 pub mod backup_tool;
 pub mod browser;
@@ -117,6 +118,7 @@ pub mod web_search_tool;
 pub mod workspace_tool;
 pub mod x_tool;
 
+pub use agentphone_tool::AgentPhoneTool;
 pub use ask_user::AskUserTool;
 pub use backup_tool::BackupTool;
 pub use browser::{BrowserTool, ComputerUseConfig};
@@ -376,6 +378,7 @@ pub fn all_tools(
         fallback_api_key,
         root_config,
         canvas_store,
+        None,
     )
 }
 
@@ -400,6 +403,7 @@ pub fn all_tools_with_runtime(
     fallback_api_key: Option<&str>,
     root_config: &crate::config::Config,
     canvas_store: Option<CanvasStore>,
+    agentphone_outbound_tracker: Option<crate::channels::agentphone::OutboundSessionTracker>,
 ) -> (
     Vec<Box<dyn Tool>>,
     Option<DelegateParentToolsHandle>,
@@ -686,6 +690,37 @@ pub fn all_tools_with_runtime(
                 root_config.x.usage.warn_at_percent,
                 root_config.x.usage.check_before_action,
             )));
+        }
+    }
+
+    // AgentPhone telephony integration (config-gated)
+    if root_config.agentphone.enabled {
+        let api_key = if root_config.agentphone.api_key.trim().is_empty() {
+            std::env::var("AGENTPHONE_API_KEY").unwrap_or_default()
+        } else {
+            root_config.agentphone.api_key.trim().to_string()
+        };
+        if api_key.trim().is_empty() {
+            tracing::warn!(
+                "AgentPhone tool enabled but no API key found \
+                (set agentphone.api_key or AGENTPHONE_API_KEY env var)"
+            );
+        } else {
+            let mut ap_tool = AgentPhoneTool::new(
+                api_key,
+                root_config.agentphone.default_agent_id.clone(),
+                root_config.agentphone.default_from_number_id.clone(),
+                root_config.agentphone.allowed_numbers.clone(),
+                root_config.agentphone.allowed_actions.clone(),
+                root_config.agentphone.voice.clone(),
+                root_config.agentphone.begin_message.clone(),
+                security.clone(),
+                memory.clone(),
+            );
+            if let Some(ref tracker) = agentphone_outbound_tracker {
+                ap_tool = ap_tool.with_outbound_tracker(Arc::clone(tracker));
+            }
+            tool_arcs.push(Arc::new(ap_tool));
         }
     }
 

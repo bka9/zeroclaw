@@ -416,6 +416,7 @@ impl Agent {
             config.api_key.as_deref(),
             config,
             None,
+            None, // agentphone outbound tracker — not used in agent context
         );
 
         // ── Wire MCP tools (non-fatal) ─────────────────────────────
