@@ -2603,24 +2603,6 @@ async fn handle_health_export(
         );
     }
 
-    // ── Bearer token auth (pairing) ──
-    if state.pairing.require_pairing() {
-        let auth = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        let token = auth.strip_prefix("Bearer ").unwrap_or("");
-        if !state.pairing.is_authenticated(token) {
-            tracing::warn!("/health/export: rejected — not paired / invalid bearer token");
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({
-                    "error": "Unauthorized — pair first via POST /pair, then send Authorization: Bearer <token>"
-                })),
-            );
-        }
-    }
-
     // ── Webhook secret auth ──
     if let Some(ref secret_hash) = state.health_webhook_secret_hash {
         let header_hash = headers
