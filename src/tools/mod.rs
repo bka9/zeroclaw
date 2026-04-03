@@ -116,6 +116,7 @@ pub mod web_fetch;
 mod web_search_provider_routing;
 pub mod web_search_tool;
 pub mod workspace_tool;
+pub mod wrappers;
 pub mod x_tool;
 
 pub use agentphone_tool::AgentPhoneTool;
@@ -217,12 +218,13 @@ pub use weather_tool::WeatherTool;
 pub use web_fetch::WebFetchTool;
 pub use web_search_tool::WebSearchTool;
 pub use workspace_tool::WorkspaceTool;
+pub use wrappers::{PathGuardedTool, RateLimitedTool};
 pub use x_tool::XTool;
 
 use crate::config::{Config, DelegateAgentConfig};
 use crate::memory::Memory;
 use crate::runtime::{NativeRuntime, RuntimeAdapter};
-use crate::security::{create_sandbox, SecurityPolicy};
+use crate::security::{SecurityPolicy, create_sandbox};
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -299,7 +301,10 @@ pub fn default_tools_with_runtime(
     runtime: Arc<dyn RuntimeAdapter>,
 ) -> Vec<Box<dyn Tool>> {
     vec![
-        Box::new(ShellTool::new(security.clone(), runtime)),
+        Box::new(RateLimitedTool::new(
+            PathGuardedTool::new(ShellTool::new(security.clone(), runtime), security.clone()),
+            security.clone(),
+        )),
         Box::new(FileReadTool::new(security.clone())),
         Box::new(FileWriteTool::new(security.clone())),
         Box::new(FileEditTool::new(security.clone())),
@@ -415,10 +420,14 @@ pub fn all_tools_with_runtime(
     let has_shell_access = runtime.has_shell_access();
     let sandbox = create_sandbox(&root_config.security);
     let mut tool_arcs: Vec<Arc<dyn Tool>> = vec![
-        Arc::new(
-            ShellTool::new_with_sandbox(security.clone(), runtime, sandbox)
-                .with_timeout_secs(root_config.shell_tool.timeout_secs),
-        ),
+        Arc::new(RateLimitedTool::new(
+            PathGuardedTool::new(
+                ShellTool::new_with_sandbox(security.clone(), runtime, sandbox)
+                    .with_timeout_secs(root_config.shell_tool.timeout_secs),
+                security.clone(),
+            ),
+            security.clone(),
+        )),
         Arc::new(FileReadTool::new(security.clone())),
         Arc::new(FileWriteTool::new(security.clone())),
         Arc::new(FileEditTool::new(security.clone())),
@@ -1170,7 +1179,8 @@ pub fn all_tools_with_runtime(
         .with_parent_tools(Arc::clone(&parent_tools))
         .with_multimodal_config(root_config.multimodal.clone())
         .with_delegate_config(root_config.delegate.clone())
-        .with_workspace_dir(workspace_dir.to_path_buf());
+        .with_workspace_dir(workspace_dir.to_path_buf())
+        .with_memory(memory.clone());
         tool_arcs.push(Arc::new(delegate_tool));
         Some(parent_tools)
     };
@@ -1520,6 +1530,7 @@ mod tests {
                 timeout_secs: None,
                 agentic_timeout_secs: None,
                 skills_directory: None,
+                memory_namespace: None,
             },
         );
 

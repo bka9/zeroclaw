@@ -4,16 +4,12 @@ pub mod workspace;
 
 #[allow(unused_imports)]
 pub use schema::{
-    apply_channel_proxy_to_builder, apply_runtime_proxy_to_builder, build_channel_proxy_client,
-    build_channel_proxy_client_with_timeouts, build_runtime_proxy_client,
-    build_runtime_proxy_client_with_timeouts, runtime_proxy_config, set_runtime_proxy_config,
-    ws_connect_with_proxy, AgentConfig, AgentPhoneChannelConfig, AgentPhoneConfig,
-    PhoneNumberConfig, PhoneNumberEntry, PhoneTrustLevel, AssemblyAiSttConfig, AuditConfig,
-    AutonomyConfig,
-    BackupConfig, BrowserComputerUseConfig, BrowserConfig, BudgetConfig, BuiltinHooksConfig,
-    ChannelsConfig, ClassificationRule, ClaudeCodeConfig, ClaudeCodeRunnerConfig, CloudOpsConfig,
-    CodexCliConfig, ComposioConfig, Config, ConversationalAiConfig, CostConfig, CronConfig,
-    CronJobDecl, CronScheduleDecl, DataRetentionConfig, DeepgramSttConfig, DelegateAgentConfig,
+    AgentConfig, AgentPhoneChannelConfig, AgentPhoneConfig, AssemblyAiSttConfig, AuditConfig,
+    AutonomyConfig, BackupConfig, BrowserComputerUseConfig, BrowserConfig, BudgetConfig,
+    BuiltinHooksConfig, ChannelsConfig, ClassificationRule, ClaudeCodeConfig,
+    ClaudeCodeRunnerConfig, CloudOpsConfig, CodexCliConfig, ComposioConfig, Config,
+    ConversationalAiConfig, CostConfig, CronConfig, CronJobDecl, CronScheduleDecl,
+    DEFAULT_GWS_SERVICES, DataRetentionConfig, DeepgramSttConfig, DelegateAgentConfig,
     DelegateToolConfig, DiscordConfig, DockerRuntimeConfig, EdgeTtsConfig, ElevenLabsTtsConfig,
     EmbeddingRouteConfig, EstopConfig, FeishuConfig, GatewayConfig, GeminiCliConfig,
     GoogleSttConfig, GoogleTtsConfig, GoogleWorkspaceAllowedOperation, GoogleWorkspaceConfig,
@@ -23,11 +19,12 @@ pub use schema::{
     IssueTrackerConfig, JiraConfig, KnowledgeConfig, LarkConfig, LinkEnricherConfig,
     LinkedInConfig, LinkedInContentConfig, LinkedInImageConfig, LocalWhisperConfig, MatrixConfig,
     McpConfig, McpServerConfig, McpTransport, MediaPipelineConfig, MemoryConfig,
-    MemoryPolicyConfig, Microsoft365Config, ModelRouteConfig, MultimodalConfig,
+    MemoryPolicyConfig, Microsoft365Config, ModelRouteConfig, MqttConfig, MultimodalConfig,
     NextcloudTalkConfig, NodeTransportConfig, NodesConfig, NotionConfig, NutritionConfig,
     ObservabilityConfig, OpenAiSttConfig, OpenAiTtsConfig, OpenCodeCliConfig, OpenVpnTunnelConfig,
-    OtpConfig, OtpMethod, PacingConfig, PeripheralBoardConfig, PeripheralsConfig, PipelineConfig,
-    PiperTtsConfig, PluginsConfig, ProjectIntelConfig, ProxyConfig, ProxyScope, QdrantConfig,
+    OtpConfig, OtpMethod, PacingConfig, PeripheralBoardConfig, PeripheralsConfig,
+    PhoneNumberConfig, PhoneNumberEntry, PhoneTrustLevel, PipelineConfig, PiperTtsConfig,
+    PluginsConfig, ProjectIntelConfig, ProxyConfig, ProxyScope, QdrantConfig,
     QueryClassificationConfig, ReliabilityConfig, ResourceLimitsConfig, RuntimeConfig,
     SandboxBackend, SandboxConfig, SchedulerConfig, SearchMode, SecretsConfig, SecurityConfig,
     SecurityOpsConfig, ShellToolConfig, SkillCreationConfig, SkillImprovementConfig, SkillsConfig,
@@ -36,7 +33,10 @@ pub use schema::{
     TextBrowserConfig, ToolFilterGroup, ToolFilterGroupMode, TranscriptionConfig, TtsConfig,
     TunnelConfig, VerifiableIntentConfig, WebFetchConfig, WebSearchConfig, WebhookConfig,
     WhatsAppChatPolicy, WhatsAppWebMode, WorkspaceConfig, XConfig, XUsageConfig,
-    DEFAULT_GWS_SERVICES,
+    apply_channel_proxy_to_builder, apply_runtime_proxy_to_builder, build_channel_proxy_client,
+    build_channel_proxy_client_with_timeouts, build_runtime_proxy_client,
+    build_runtime_proxy_client_with_timeouts, runtime_proxy_config, set_runtime_proxy_config,
+    ws_connect_with_proxy,
 };
 
 pub fn name_and_presence<T: traits::ChannelConfig>(channel: Option<&T>) -> (&'static str, bool) {
@@ -80,6 +80,7 @@ mod tests {
             stream_mode: StreamMode::default(),
             draft_update_interval_ms: 1000,
             multi_message_delay_ms: 800,
+            stall_timeout_secs: 0,
         };
 
         let lark = LarkConfig {
@@ -111,6 +112,7 @@ mod tests {
             webhook_secret: None,
             allowed_users: vec!["*".into()],
             proxy_url: None,
+            bot_name: None,
         };
 
         assert_eq!(telegram.allowed_users.len(), 1);
