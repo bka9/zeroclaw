@@ -307,7 +307,7 @@ impl PrometheusObserver {
 impl Observer for PrometheusObserver {
     fn record_event(&self, event: &ObserverEvent) {
         match event {
-            ObserverEvent::AgentStart { provider, model } => {
+            ObserverEvent::AgentStart { provider, model, .. } => {
                 self.agent_starts
                     .with_label_values(&[provider, model])
                     .inc();
@@ -318,6 +318,7 @@ impl Observer for PrometheusObserver {
                 duration,
                 tokens_used,
                 cost_usd: _,
+                ..
             } => {
                 // Agent duration is recorded via the histogram with provider/model labels
                 self.agent_duration
@@ -351,7 +352,7 @@ impl Observer for PrometheusObserver {
                 }
             }
             ObserverEvent::ToolCallStart { .. }
-            | ObserverEvent::TurnComplete
+            | ObserverEvent::TurnComplete { .. }
             | ObserverEvent::LlmRequest { .. }
             | ObserverEvent::DeploymentStarted { .. }
             | ObserverEvent::RecoveryCompleted { .. } => {}
@@ -359,6 +360,7 @@ impl Observer for PrometheusObserver {
                 tool,
                 duration,
                 success,
+                ..
             } => {
                 let success_str = if *success { "true" } else { "false" };
                 self.tool_calls
@@ -529,6 +531,8 @@ mod tests {
         obs.record_event(&ObserverEvent::AgentStart {
             provider: "openrouter".into(),
             model: "claude-sonnet".into(),
+            invocation_id: None,
+            trigger_source: None,
         });
         obs.record_event(&ObserverEvent::AgentEnd {
             provider: "openrouter".into(),
@@ -536,6 +540,7 @@ mod tests {
             duration: Duration::from_millis(500),
             tokens_used: Some(100),
             cost_usd: None,
+            invocation_id: None,
         });
         obs.record_event(&ObserverEvent::AgentEnd {
             provider: "openrouter".into(),
@@ -543,16 +548,19 @@ mod tests {
             duration: Duration::ZERO,
             tokens_used: None,
             cost_usd: None,
+            invocation_id: None,
         });
         obs.record_event(&ObserverEvent::ToolCall {
             tool: "shell".into(),
             duration: Duration::from_millis(10),
             success: true,
+            invocation_id: None,
         });
         obs.record_event(&ObserverEvent::ToolCall {
             tool: "file_read".into(),
             duration: Duration::from_millis(5),
             success: false,
+            invocation_id: None,
         });
         obs.record_event(&ObserverEvent::ChannelMessage {
             channel: "telegram".into(),
@@ -581,11 +589,14 @@ mod tests {
         obs.record_event(&ObserverEvent::AgentStart {
             provider: "openrouter".into(),
             model: "claude-sonnet".into(),
+            invocation_id: None,
+            trigger_source: None,
         });
         obs.record_event(&ObserverEvent::ToolCall {
             tool: "shell".into(),
             duration: Duration::from_millis(100),
             success: true,
+            invocation_id: None,
         });
         obs.record_event(&ObserverEvent::HeartbeatTick);
         obs.record_metric(&ObserverMetric::RequestLatency(Duration::from_millis(250)));
@@ -617,16 +628,19 @@ mod tests {
             tool: "shell".into(),
             duration: Duration::from_millis(10),
             success: true,
+            invocation_id: None,
         });
         obs.record_event(&ObserverEvent::ToolCall {
             tool: "shell".into(),
             duration: Duration::from_millis(10),
             success: true,
+            invocation_id: None,
         });
         obs.record_event(&ObserverEvent::ToolCall {
             tool: "shell".into(),
             duration: Duration::from_millis(10),
             success: false,
+            invocation_id: None,
         });
 
         let output = obs.encode();
@@ -677,6 +691,7 @@ mod tests {
             error_message: None,
             input_tokens: Some(100),
             output_tokens: Some(50),
+            invocation_id: None,
         });
         obs.record_event(&ObserverEvent::LlmResponse {
             provider: "openrouter".into(),
@@ -686,6 +701,7 @@ mod tests {
             error_message: None,
             input_tokens: Some(200),
             output_tokens: Some(80),
+            invocation_id: None,
         });
 
         let output = obs.encode();
@@ -767,6 +783,7 @@ mod tests {
             error_message: Some("timeout".into()),
             input_tokens: None,
             output_tokens: None,
+            invocation_id: None,
         });
 
         let output = obs.encode();

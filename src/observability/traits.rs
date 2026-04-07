@@ -9,7 +9,15 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub enum ObserverEvent {
     /// The agent orchestration loop has started a new session.
-    AgentStart { provider: String, model: String },
+    AgentStart {
+        provider: String,
+        model: String,
+        /// Unique identifier for this agent invocation, used to correlate
+        /// child spans (LLM calls, tool calls) with their parent invocation.
+        invocation_id: Option<String>,
+        /// What triggered this invocation: `"cli"`, `"telegram"`, `"cron:<name>"`, etc.
+        trigger_source: Option<String>,
+    },
     /// A request is about to be sent to an LLM provider.
     ///
     /// This is emitted immediately before a provider call so observers can print
@@ -18,6 +26,7 @@ pub enum ObserverEvent {
         provider: String,
         model: String,
         messages_count: usize,
+        invocation_id: Option<String>,
     },
     /// Result of a single LLM provider call.
     LlmResponse {
@@ -28,6 +37,7 @@ pub enum ObserverEvent {
         error_message: Option<String>,
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
+        invocation_id: Option<String>,
     },
     /// The agent session has finished.
     ///
@@ -38,20 +48,25 @@ pub enum ObserverEvent {
         duration: Duration,
         tokens_used: Option<u64>,
         cost_usd: Option<f64>,
+        invocation_id: Option<String>,
     },
     /// A tool call is about to be executed.
     ToolCallStart {
         tool: String,
         arguments: Option<String>,
+        invocation_id: Option<String>,
     },
     /// A tool call has completed with a success/failure outcome.
     ToolCall {
         tool: String,
         duration: Duration,
         success: bool,
+        invocation_id: Option<String>,
     },
     /// The agent produced a final answer for the current user message.
-    TurnComplete,
+    TurnComplete {
+        invocation_id: Option<String>,
+    },
     /// A message was sent or received through a channel.
     ChannelMessage {
         /// Channel name (e.g., `"telegram"`, `"discord"`).
@@ -249,6 +264,7 @@ mod tests {
             tool: "shell".into(),
             duration: Duration::from_millis(10),
             success: true,
+            invocation_id: None,
         };
         let metric = ObserverMetric::RequestLatency(Duration::from_millis(8));
 

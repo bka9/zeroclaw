@@ -99,6 +99,10 @@ impl Tool for AskUserTool {
                 "channel": {
                     "type": "string",
                     "description": "Target channel name. Defaults to the first available channel if omitted."
+                },
+                "recipient": {
+                    "type": "string",
+                    "description": "The recipient/chat ID to send the question to. Auto-injected from conversation context when available."
                 }
             },
             "required": ["question"]
@@ -146,6 +150,13 @@ impl Tool for AskUserTool {
             .and_then(|v| v.as_str())
             .map(|s| s.trim().to_string());
 
+        let recipient = args
+            .get("recipient")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default();
+
         // Resolve channel from handle — block-scoped to drop the RwLock guard
         // before any `.await` (parking_lot guards are !Send).
         let (channel_name, channel): (String, Arc<dyn Channel>) = {
@@ -177,7 +188,7 @@ impl Tool for AskUserTool {
 
         // Format and send the question
         let text = format_question(&question, choices.as_deref());
-        let msg = SendMessage::new(&text, "");
+        let msg = SendMessage::new(&text, &recipient);
         if let Err(e) = channel.send(&msg).await {
             return Ok(ToolResult {
                 success: false,

@@ -16,6 +16,7 @@ const MAX_STDERR_CHARS: usize = 500;
 /// Uses `tokio::process::Command` (no shell) to prevent command injection.
 pub struct BeadsProvider {
     bd_path: String,
+    root_dir: Option<String>,
     db_path: Option<String>,
     actor: Option<String>,
     timeout: Duration,
@@ -24,21 +25,27 @@ pub struct BeadsProvider {
 impl BeadsProvider {
     pub fn new(
         bd_path: String,
+        root_dir: Option<String>,
         db_path: Option<String>,
         actor: Option<String>,
         timeout_secs: u64,
     ) -> Self {
         Self {
             bd_path,
+            root_dir,
             db_path,
             actor,
             timeout: Duration::from_secs(timeout_secs),
         }
     }
 
-    /// Build a `Command` pre-configured with global flags (`--db`, `--actor`).
+    /// Build a `Command` pre-configured with working directory and global flags
+    /// (`--db`, `--actor`).
     fn base_cmd(&self) -> Command {
         let mut cmd = Command::new(&self.bd_path);
+        if let Some(ref dir) = self.root_dir {
+            cmd.current_dir(dir);
+        }
         if let Some(ref db) = self.db_path {
             cmd.arg("--db").arg(db);
         }

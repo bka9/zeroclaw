@@ -853,14 +853,27 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Initialize logging - respects RUST_LOG env var, defaults to INFO
-    let subscriber = fmt::Subscriber::builder()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    // Initialize logging - respects RUST_LOG env var, defaults to INFO.
+    // Log format can be set via ZEROCLAW_LOG_FORMAT env var ("text" or "json")
+    // before config is loaded. The config file's `observability.log_format`
+    // field serves the same purpose but is read later.
+    let log_format = std::env::var("ZEROCLAW_LOG_FORMAT").unwrap_or_default();
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    if log_format.eq_ignore_ascii_case("json") {
+        let subscriber = fmt::Subscriber::builder()
+            .with_env_filter(env_filter)
+            .json()
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("setting default subscriber failed");
+    } else {
+        let subscriber = fmt::Subscriber::builder()
+            .with_env_filter(env_filter)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("setting default subscriber failed");
+    }
 
     // Onboard auto-detects the environment: if stdin/stdout are a TTY and no
     // provider flags were given, it runs the full interactive wizard; otherwise

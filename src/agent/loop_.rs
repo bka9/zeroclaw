@@ -2159,6 +2159,7 @@ pub(crate) async fn agent_turn(
         0,    // max_tool_result_chars: 0 = disabled (legacy callers)
         0,    // context_token_budget: 0 = disabled (legacy callers)
         None, // shared_budget: no shared budget for legacy callers
+        None, // invocation_id: not available in legacy callers
     )
     .await
 }
@@ -2169,7 +2170,7 @@ fn maybe_inject_channel_delivery_defaults(
     channel_name: &str,
     channel_reply_target: Option<&str>,
 ) {
-    if tool_name != "cron_add" {
+    if !matches!(tool_name, "cron_add" | "ask_user") {
         return;
     }
 
@@ -2190,6 +2191,17 @@ fn maybe_inject_channel_delivery_defaults(
     let Some(args) = tool_args.as_object_mut() else {
         return;
     };
+
+    // For ask_user: inject recipient so the question goes to the right chat
+    if tool_name == "ask_user" {
+        if !args.contains_key("recipient") {
+            args.insert(
+                "recipient".to_string(),
+                serde_json::Value::String(reply_target.to_string()),
+            );
+        }
+        return;
+    }
 
     let is_agent_job = args
         .get("job_type")
@@ -2297,6 +2309,7 @@ pub(crate) async fn run_tool_call_loop(
     max_tool_result_chars: usize,
     context_token_budget: usize,
     shared_budget: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    invocation_id: Option<String>,
 ) -> Result<String> {
     let max_iterations = if max_tool_iterations == 0 {
         DEFAULT_MAX_TOOL_ITERATIONS
@@ -2482,6 +2495,7 @@ pub(crate) async fn run_tool_call_loop(
             provider: active_provider_name.to_string(),
             model: active_model.to_string(),
             messages_count: history.len(),
+            invocation_id: invocation_id.clone(),
         });
         runtime_trace::record_event(
             "llm_request",
@@ -2675,6 +2689,7 @@ pub(crate) async fn run_tool_call_loop(
                     error_message: None,
                     input_tokens: resp_input_tokens,
                     output_tokens: resp_output_tokens,
+                    invocation_id: invocation_id.clone(),
                 });
 
                 // Record cost via task-local tracker (no-op when not scoped)
@@ -2790,6 +2805,7 @@ pub(crate) async fn run_tool_call_loop(
                     error_message: Some(safe_error.clone()),
                     input_tokens: None,
                     output_tokens: None,
+                    invocation_id: invocation_id.clone(),
                 });
                 runtime_trace::record_event(
                     "llm_response",
@@ -3656,9 +3672,13 @@ pub async fn run(
 
     let model_switch_callback = get_model_switch_state();
 
+    let invocation_id = uuid::Uuid::new_v4().to_string();
+
     observer.record_event(&ObserverEvent::AgentStart {
         provider: provider_name.to_string(),
         model: model_name.to_string(),
+        invocation_id: Some(invocation_id.clone()),
+        trigger_source: Some("cli".to_string()),
     });
 
     // ── Hardware RAG (datasheet retrieval when peripherals + datasheet_dir) ──
@@ -3981,6 +4001,7 @@ pub async fn run(
                 config.agent.max_tool_result_chars,
                 config.agent.max_context_tokens,
                 None, // shared_budget
+                Some(invocation_id.clone()),
             )
             .await
             {
@@ -4016,6 +4037,8 @@ pub async fn run(
                         observer.record_event(&ObserverEvent::AgentStart {
                             provider: provider_name.to_string(),
                             model: model_name.to_string(),
+                            invocation_id: Some(invocation_id.clone()),
+                            trigger_source: None,
                         });
 
                         continue;
@@ -4047,7 +4070,7 @@ pub async fn run(
         }
         final_output = response.clone();
         println!("{response}");
-        observer.record_event(&ObserverEvent::TurnComplete);
+        observer.record_event(&ObserverEvent::TurnComplete { invocation_id: Some(invocation_id.clone()) });
     } else {
         println!("🦀 ZeroClaw Interactive Mode");
         println!("Type /help for commands.\n");
@@ -4287,6 +4310,7 @@ pub async fn run(
                     config.agent.max_tool_result_chars,
                     config.agent.max_context_tokens,
                     None, // shared_budget
+                    Some(invocation_id.clone()),
                 )
                 .await
                 {
@@ -4323,6 +4347,8 @@ pub async fn run(
                             observer.record_event(&ObserverEvent::AgentStart {
                                 provider: provider_name.to_string(),
                                 model: model_name.to_string(),
+                                invocation_id: Some(invocation_id.clone()),
+                                trigger_source: None,
                             });
 
                             continue;
@@ -4388,7 +4414,7 @@ pub async fn run(
             {
                 eprintln!("\nError sending CLI response: {e}\n");
             }
-            observer.record_event(&ObserverEvent::TurnComplete);
+            observer.record_event(&ObserverEvent::TurnComplete { invocation_id: Some(invocation_id.clone()) });
 
             // Context compression before hard trimming to preserve long-context signal.
             {
@@ -4445,6 +4471,7 @@ pub async fn run(
         duration,
         tokens_used: None,
         cost_usd: None,
+        invocation_id: Some(invocation_id.clone()),
     });
 
     Ok(final_output)
@@ -5801,6 +5828,7 @@ mod tests {
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect_err("provider without vision support should fail");
@@ -5856,6 +5884,7 @@ mod tests {
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect_err("oversized payload must fail");
@@ -5905,6 +5934,7 @@ mod tests {
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect("valid multimodal payload should pass");
@@ -5953,6 +5983,7 @@ mod tests {
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect_err("should fail without vision_provider config");
@@ -6008,6 +6039,7 @@ mod tests {
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect_err("should fail when vision provider cannot be created");
@@ -6063,6 +6095,7 @@ mod tests {
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect("text-only messages should succeed with default provider");
@@ -6119,6 +6152,7 @@ mod tests {
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect_err("should fail due to nonexistent vision provider");
@@ -6173,6 +6207,7 @@ mod tests {
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect("empty image markers should not trigger vision routing");
@@ -6227,6 +6262,7 @@ mod tests {
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect_err("should attempt vision provider creation for multiple images");
@@ -6364,6 +6400,7 @@ mod tests {
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect("parallel execution should complete");
@@ -6438,6 +6475,7 @@ mod tests {
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect("cron_add delivery defaults should be injected");
@@ -6504,6 +6542,7 @@ mod tests {
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect("explicit delivery mode should be preserved");
@@ -6565,6 +6604,7 @@ mod tests {
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect("loop should finish after deduplicating repeated calls");
@@ -6638,6 +6678,7 @@ mod tests {
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect("non-interactive shell should succeed for low-risk command");
@@ -6702,6 +6743,7 @@ mod tests {
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect("loop should finish with exempt tool executing twice");
@@ -6786,6 +6828,7 @@ mod tests {
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect("loop should complete");
@@ -6847,6 +6890,7 @@ mod tests {
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect("native fallback id flow should complete");
@@ -6932,6 +6976,7 @@ mod tests {
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect("native tool-call text should be relayed through on_delta");
@@ -7001,6 +7046,7 @@ mod tests {
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect("streaming provider should complete");
@@ -7072,6 +7118,7 @@ mod tests {
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect("streaming tool loop should execute tool and finish");
@@ -7147,6 +7194,7 @@ mod tests {
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect("native streaming events should preserve tool loop semantics");
@@ -7231,6 +7279,7 @@ mod tests {
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect("routed streaming provider should complete");
@@ -9244,6 +9293,7 @@ Let me check the result."#;
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect("tool loop should complete");
@@ -9401,6 +9451,7 @@ Let me check the result."#;
                     0,
                     0,
                     None,
+                    None, // invocation_id
                 ),
             )
             .await
@@ -9483,6 +9534,7 @@ Let me check the result."#;
                     0,
                     0,
                     None,
+                    None, // invocation_id
                 ),
             )
             .await
@@ -9541,6 +9593,7 @@ Let me check the result."#;
             0,
             0,
             None,
+            None, // invocation_id
         )
         .await
         .expect("should succeed without cost scope");

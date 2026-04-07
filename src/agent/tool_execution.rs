@@ -46,6 +46,7 @@ pub(crate) async fn execute_one_tool(
     observer.record_event(&ObserverEvent::ToolCallStart {
         tool: call_name.to_string(),
         arguments: Some(args_summary),
+        invocation_id: None,
     });
     let start = Instant::now();
 
@@ -62,6 +63,7 @@ pub(crate) async fn execute_one_tool(
             tool: call_name.to_string(),
             duration,
             success: false,
+            invocation_id: None,
         });
         return Ok(ToolExecutionOutcome {
             output: reason.clone(),
@@ -88,6 +90,7 @@ pub(crate) async fn execute_one_tool(
                 tool: call_name.to_string(),
                 duration,
                 success: r.success,
+                invocation_id: None,
             });
             if r.success {
                 Ok(ToolExecutionOutcome {
@@ -112,6 +115,7 @@ pub(crate) async fn execute_one_tool(
                 tool: call_name.to_string(),
                 duration,
                 success: false,
+                invocation_id: None,
             });
             let reason = format!("Error executing {call_name}: {e}");
             Ok(ToolExecutionOutcome {

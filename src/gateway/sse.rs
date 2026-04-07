@@ -141,6 +141,7 @@ impl crate::observability::Observer for BroadcastObserver {
                 tool,
                 duration,
                 success,
+                ..
             } => serde_json::json!({
                 "type": "tool_call",
                 "tool": tool,
@@ -161,7 +162,7 @@ impl crate::observability::Observer for BroadcastObserver {
                     "timestamp": chrono::Utc::now().to_rfc3339(),
                 })
             }
-            crate::observability::ObserverEvent::AgentStart { provider, model } => {
+            crate::observability::ObserverEvent::AgentStart { provider, model, .. } => {
                 serde_json::json!({
                     "type": "agent_start",
                     "provider": provider,
@@ -175,6 +176,7 @@ impl crate::observability::Observer for BroadcastObserver {
                 duration,
                 tokens_used,
                 cost_usd,
+                ..
             } => serde_json::json!({
                 "type": "agent_end",
                 "provider": provider,

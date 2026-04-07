@@ -1563,12 +1563,15 @@ async fn handle_webhook(
         .unwrap_or_else(|| "unknown".to_string());
     let model_label = state.model.clone();
     let started_at = Instant::now();
+    let invocation_id = uuid::Uuid::new_v4().to_string();
 
     state
         .observer
         .record_event(&crate::observability::ObserverEvent::AgentStart {
             provider: provider_label.clone(),
             model: model_label.clone(),
+            invocation_id: Some(invocation_id.clone()),
+            trigger_source: Some("gateway".to_string()),
         });
     state
         .observer
@@ -1576,6 +1579,7 @@ async fn handle_webhook(
             provider: provider_label.clone(),
             model: model_label.clone(),
             messages_count: 1,
+            invocation_id: Some(invocation_id.clone()),
         });
 
     match run_gateway_chat_simple(&state, message).await {
@@ -1591,6 +1595,7 @@ async fn handle_webhook(
                     error_message: None,
                     input_tokens: None,
                     output_tokens: None,
+                    invocation_id: Some(invocation_id.clone()),
                 });
             state.observer.record_metric(
                 &crate::observability::traits::ObserverMetric::RequestLatency(duration),
@@ -1603,6 +1608,7 @@ async fn handle_webhook(
                     duration,
                     tokens_used: None,
                     cost_usd: None,
+                    invocation_id: Some(invocation_id),
                 });
 
             let body = serde_json::json!({"response": response, "model": state.model});
@@ -1622,6 +1628,7 @@ async fn handle_webhook(
                     error_message: Some(sanitized.clone()),
                     input_tokens: None,
                     output_tokens: None,
+                    invocation_id: Some(invocation_id.clone()),
                 });
             state.observer.record_metric(
                 &crate::observability::traits::ObserverMetric::RequestLatency(duration),
@@ -1640,6 +1647,7 @@ async fn handle_webhook(
                     duration,
                     tokens_used: None,
                     cost_usd: None,
+                    invocation_id: Some(invocation_id),
                 });
 
             tracing::error!("Webhook provider error: {}", sanitized);
