@@ -322,6 +322,7 @@ mod tests {
             backend: "none".to_string(),
             otel_endpoint: None,
             otel_service_name: None,
+            log_format: "text".to_string(),
             runtime_trace_mode: "rolling".to_string(),
             runtime_trace_path: "state/runtime-trace.jsonl".to_string(),
             runtime_trace_max_entries: 3,

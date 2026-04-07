@@ -5135,6 +5135,11 @@ pub struct ObservabilityConfig {
     #[serde(default)]
     pub otel_service_name: Option<String>,
 
+    /// Log output format: "text" (default) | "json".
+    /// When set to "json", log output uses JSONL format for machine parsing.
+    #[serde(default = "default_log_format")]
+    pub log_format: String,
+
     /// Runtime trace storage mode: "none" | "rolling" | "full".
     /// Controls whether model replies and tool-call diagnostics are persisted.
     #[serde(default = "default_runtime_trace_mode")]
@@ -5155,11 +5160,16 @@ impl Default for ObservabilityConfig {
             backend: "none".into(),
             otel_endpoint: None,
             otel_service_name: None,
+            log_format: default_log_format(),
             runtime_trace_mode: default_runtime_trace_mode(),
             runtime_trace_path: default_runtime_trace_path(),
             runtime_trace_max_entries: default_runtime_trace_max_entries(),
         }
     }
+}
+
+fn default_log_format() -> String {
+    "text".to_string()
 }
 
 fn default_runtime_trace_mode() -> String {
@@ -8562,6 +8572,11 @@ pub struct IssueTrackerConfig {
     /// Path to the `bd` binary. Default: `"bd"` (PATH lookup).
     #[serde(default = "default_issue_tracker_bd_path")]
     pub bd_path: String,
+    /// Root directory of the beads project (where `.beads/` lives).
+    /// `bd` commands will run with this as their working directory.
+    /// Empty = use the process working directory.
+    #[serde(default)]
+    pub root_dir: String,
     /// Path to the Beads/Dolt database directory. Empty = use `bd` default.
     #[serde(default)]
     pub db_path: String,
@@ -8605,6 +8620,7 @@ impl Default for IssueTrackerConfig {
             enabled: false,
             provider: default_issue_tracker_provider(),
             bd_path: default_issue_tracker_bd_path(),
+            root_dir: String::new(),
             db_path: String::new(),
             actor: String::new(),
             allowed_actions: default_issue_tracker_allowed_actions(),

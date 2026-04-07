@@ -615,6 +615,7 @@ impl Agent {
                         tool: call.name.clone(),
                         duration: start.elapsed(),
                         success: r.success,
+                        invocation_id: None,
                     });
                     if r.success {
                         r.output
@@ -627,6 +628,7 @@ impl Agent {
                         tool: call.name.clone(),
                         duration: start.elapsed(),
                         success: false,
+                        invocation_id: None,
                     });
                     format!("Error executing {}: {e}", call.name)
                 }
@@ -641,6 +643,7 @@ impl Agent {
                             tool: call.name.clone(),
                             duration: start.elapsed(),
                             success: r.success,
+                            invocation_id: None,
                         });
                         if r.success {
                             r.output
@@ -653,6 +656,7 @@ impl Agent {
                             tool: call.name.clone(),
                             duration: start.elapsed(),
                             success: false,
+                            invocation_id: None,
                         });
                         format!("Error executing {}: {e}", call.name)
                     }
@@ -1254,9 +1258,13 @@ pub async fn run(
         .unwrap_or("anthropic/claude-sonnet-4-20250514")
         .to_string();
 
+    let invocation_id = uuid::Uuid::new_v4().to_string();
+
     agent.observer.record_event(&ObserverEvent::AgentStart {
         provider: provider_name.clone(),
         model: model_name.clone(),
+        invocation_id: Some(invocation_id.clone()),
+        trigger_source: Some("cli".to_string()),
     });
 
     if let Some(msg) = message {
@@ -1272,6 +1280,7 @@ pub async fn run(
         duration: start.elapsed(),
         tokens_used: None,
         cost_usd: None,
+        invocation_id: Some(invocation_id.clone()),
     });
 
     Ok(())

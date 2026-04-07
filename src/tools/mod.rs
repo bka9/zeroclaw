@@ -831,6 +831,11 @@ pub fn all_tools_with_runtime(
                     } else {
                         root_config.issue_tracker.bd_path.trim().to_string()
                     };
+                    let root_dir = if root_config.issue_tracker.root_dir.trim().is_empty() {
+                        None
+                    } else {
+                        Some(root_config.issue_tracker.root_dir.trim().to_string())
+                    };
                     let db_path = if root_config.issue_tracker.db_path.trim().is_empty() {
                         None
                     } else {
@@ -843,6 +848,7 @@ pub fn all_tools_with_runtime(
                     };
                     Some(Box::new(issue_tracker::beads::BeadsProvider::new(
                         bd_path,
+                        root_dir,
                         db_path,
                         actor,
                         root_config.issue_tracker.timeout_secs,
